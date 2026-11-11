@@ -8,10 +8,16 @@
 #   deploy role   used by the au, uk and us environments   runs Terraform
 #   publish role  used by the build environment            may only push images to the cm-* registries
 
-variable "github_repo" {
-  description = "owner/name of the repository allowed to deploy"
+# How GitHub names this repository in the token it signs (the start of the "sub" claim).
+# This repository uses GitHub's immutable form, which carries the owner's and the repository's
+# numeric IDs next to their names:  repo:<owner>@<owner id>/<repository>@<repository id>
+# The IDs never change and are never reused, so if the repository were deleted and someone else
+# created one with the same name, their workflows would still be refused.
+# To see the value for a repository:  gh api repos/<owner>/<repository>/actions/oidc/customization/sub
+variable "github_subject_prefix" {
+  description = "Start of the token subject for the repository allowed to deploy"
   type        = string
-  default     = "sabiut/case-manager-platform"
+  default     = "repo:sabiut@8152759/case-manager-platform@1453499202"
 }
 
 # The account already trusts GitHub as an identity provider (one per account), so look it up.
@@ -36,7 +42,7 @@ locals {
           StringEquals = {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
             "token.actions.githubusercontent.com:sub" = [
-              for env in environments : "repo:${var.github_repo}:environment:${env}"
+              for env in environments : "${var.github_subject_prefix}:environment:${env}"
             ]
           }
         }
