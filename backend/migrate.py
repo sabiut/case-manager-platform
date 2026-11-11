@@ -1,5 +1,5 @@
 """Database migration. Run once per deployment as a separate one-off task, BEFORE the new app
-version is rolled out, and never by the web app itself.
+version is rolled out, and never by the API itself.
 
 It signs in with the ADMIN login and does three things, all safe to repeat:
   1. creates the customer database if it is missing
@@ -13,7 +13,7 @@ Rules for schema changes, because the previous app version is still running whil
 Environment variables:
   DB_HOST, DB_ADMIN_USER, DB_ADMIN_PASSWORD   admin access, given only to this task
   DB_NAME                                     the customer database (default: demo)
-  APP_DB_USER, APP_DB_PASSWORD                the login the web app will use
+  APP_DB_USER, APP_DB_PASSWORD                the login the API will use
 """
 import os
 import re

@@ -1,7 +1,8 @@
-# Three-tier network:
-#   public subnets    -> load balancer (reachable from the internet)
-#   app subnets       -> application (private, reaches the internet only through the NAT gateway)
-#   database subnets  -> RDS (private, no route to the internet at all)
+# Network for a three-tier application:
+#   public subnets    -> the internet-facing load balancer and the NAT gateway. No application runs here.
+#   web subnets       -> tier 1, frontend (private, reaches the internet only through the NAT gateway)
+#   app subnets       -> tier 2, backend API (private, same outbound path)
+#   database subnets  -> tier 3, RDS (private, no route to the internet at all)
 
 # Zone names differ in every region, so look them up instead of hardcoding.
 data "aws_availability_zones" "available" {
@@ -39,6 +40,17 @@ resource "aws_subnet" "public" {
     Name                     = "${var.name}-public-${local.azs[count.index]}"
     Tier                     = "public"
     "kubernetes.io/role/elb" = "1" # lets EKS place internet-facing load balancers here
+  }
+}
+
+resource "aws_subnet" "web" {
+  count             = var.az_count
+  vpc_id            = aws_vpc.this.id
+  availability_zone = local.azs[count.index]
+  cidr_block        = cidrsubnet(var.cidr, 8, count.index + 5)
+  tags = {
+    Name = "${var.name}-web-${local.azs[count.index]}"
+    Tier = "web"
   }
 }
 
@@ -88,13 +100,14 @@ resource "aws_route_table" "public" {
   tags = { Name = "${var.name}-public" }
 }
 
+# Shared by the web and app subnets: outbound only, through the NAT gateway.
 resource "aws_route_table" "app" {
   vpc_id = aws_vpc.this.id
   route {
     cidr_block     = "0.0.0.0/0"
     nat_gateway_id = aws_nat_gateway.this.id
   }
-  tags = { Name = "${var.name}-app" }
+  tags = { Name = "${var.name}-private" }
 }
 
 # No routes besides the local VPC route: the database tier cannot reach the internet.
@@ -107,6 +120,12 @@ resource "aws_route_table_association" "public" {
   count          = var.az_count
   subnet_id      = aws_subnet.public[count.index].id
   route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table_association" "web" {
+  count          = var.az_count
+  subnet_id      = aws_subnet.web[count.index].id
+  route_table_id = aws_route_table.app.id
 }
 
 resource "aws_route_table_association" "app" {

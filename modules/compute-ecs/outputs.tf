@@ -1,17 +1,19 @@
 output "url" {
-  value = "http://${aws_lb.this.dns_name}"
+  value = "http://${aws_lb.web.dns_name}"
 }
 
-output "app_security_group_id" {
-  value = aws_security_group.app.id
+output "api_internal_url" {
+  description = "Reachable only from inside the VPC"
+  value       = "http://${aws_lb.api.dns_name}"
+}
+
+output "api_security_group_id" {
+  description = "The only security group allowed into the database"
+  value       = aws_security_group.api.id
 }
 
 output "cluster_name" {
   value = aws_ecs_cluster.this.name
-}
-
-output "service_name" {
-  value = aws_ecs_service.app.name
 }
 
 output "log_group" {
@@ -19,10 +21,16 @@ output "log_group" {
 }
 
 output "load_balancer_arn" {
-  value = aws_lb.this.arn
+  description = "The internet-facing load balancer, for the web application firewall"
+  value       = aws_lb.web.arn
 }
 
-output "task_definition_arn" {
-  description = "The exact version this deployment asked ECS to run"
-  value       = aws_ecs_task_definition.app.arn
+output "web_task_definition_arn" {
+  description = "The exact frontend version this deployment asked ECS to run"
+  value       = aws_ecs_task_definition.web.arn
+}
+
+output "api_task_definition_arn" {
+  description = "The exact API version this deployment asked ECS to run"
+  value       = aws_ecs_task_definition.api.arn
 }

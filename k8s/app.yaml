@@ -1,16 +1,33 @@
+# Three-tier layout on Kubernetes. Subnets do not separate the tiers here, because every pod runs
+# on the same worker nodes. Kubernetes objects do the same job instead:
+#
+#   internet
+#     -> public network load balancer   (Service "case-manager-web", type LoadBalancer)
+#     -> frontend pods                  tier 1: serves pages, has no database access
+#     -> internal address only          (Service "case-manager-api", type ClusterIP: no load balancer,
+#                                        no address outside the cluster)
+#     -> backend API pods               tier 2: the only thing allowed to talk to the database
+#     -> RDS SQL Server                 tier 3 (outside the cluster, foundation layer)
+#
+# The two NetworkPolicy objects at the bottom are the firewall rules between the tiers.
+# Both workloads run a placeholder web server until the real images are wired in.
+#
 # Deploy with:
 #   aws eks update-kubeconfig --name cm-eks-au --region ap-southeast-2
 #   kubectl apply -f k8s/app.yaml
-#   kubectl get service case-manager     (the EXTERNAL-IP column is the address to open)
+#   kubectl get service case-manager-web     (the EXTERNAL-IP column is the address to open)
+
+# ---------- Tier 1: frontend ----------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: case-manager
+  name: case-manager-web
 spec:
   replicas: 2
   selector:
     matchLabels:
       app: case-manager
+      tier: web
   strategy:
     rollingUpdate:
       maxUnavailable: 0   # zero downtime: start a new pod before stopping an old one
@@ -19,6 +36,7 @@ spec:
     metadata:
       labels:
         app: case-manager
+        tier: web
     spec:
       topologySpreadConstraints:      # put the two pods in different zones
         - maxSkew: 1
@@ -27,9 +45,13 @@ spec:
           labelSelector:
             matchLabels:
               app: case-manager
+              tier: web
       containers:
-        - name: app
-          image: public.ecr.aws/nginx/nginx:stable   # placeholder until the real app is pushed
+        - name: web
+          image: public.ecr.aws/nginx/nginx:stable   # placeholder until the frontend image is wired in
+          env:
+            - name: API_URL                          # the frontend finds the API by its Service name
+              value: http://case-manager-api
           ports:
             - containerPort: 80
           readinessProbe:
@@ -41,13 +63,118 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: case-manager
+  name: case-manager-web
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: nlb
 spec:
-  type: LoadBalancer
+  type: LoadBalancer      # the only thing in this file with an internet address
   selector:
     app: case-manager
+    tier: web
   ports:
     - port: 80
       targetPort: 80
+---
+# ---------- Tier 2: backend API ----------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: case-manager-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: case-manager
+      tier: api
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: case-manager
+        tier: api
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: case-manager
+              tier: api
+      containers:
+        - name: api
+          image: public.ecr.aws/nginx/nginx:stable   # placeholder until the API image is wired in
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: case-manager-api
+spec:
+  type: ClusterIP         # reachable only from inside the cluster
+  selector:
+    app: case-manager
+    tier: api
+  ports:
+    - port: 80
+      targetPort: 80
+---
+# ---------- Rules between the tiers ----------
+# The API accepts connections from frontend pods only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-from-web-only
+spec:
+  podSelector:
+    matchLabels:
+      app: case-manager
+      tier: api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: case-manager
+              tier: web
+      ports:
+        - port: 80
+---
+# The frontend may call the API and look up names (DNS). Nothing else, so it cannot reach the database.
+# This rule matters on Kubernetes: the database's security group allows the worker nodes, and every
+# pod leaves through its node, so without it a frontend pod could open a connection to the database.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: web-to-api-only
+spec:
+  podSelector:
+    matchLabels:
+      app: case-manager
+      tier: web
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: case-manager
+              tier: api
+      ports:
+        - port: 80
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }

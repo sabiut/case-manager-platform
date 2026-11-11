@@ -2,7 +2,10 @@
 # Started by hand from the Actions tab.
 #
 #   Layer foundation = network + database + image registry. Slow (about 25 minutes), done once per region.
-#   Layer app        = load balancer + firewall + app tier. Fast, deploy and destroy as often as you like.
+#   Layer app        = load balancers + firewall + frontend and backend API. Fast, deploy and destroy as often as you like.
+#
+#   Every project is three tiers: frontend -> backend API -> database.
+#   Only the frontend is reachable from the internet. Only the backend API can reach the database.
 #
 #   Deploy order:  foundation, then (build workflow), then app.
 #   Destroy order: app first, then foundation.
@@ -17,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       project:
-        description: Which app tier
+        description: What the frontend and backend API run on
         type: choice
         options: [ecs, ec2, eks]
         default: ecs
@@ -54,7 +57,7 @@ on:
         description: "Foundation layer only: database setup"
         type: choice
         options: [express, standard-multi-az]
-        default: express
+        default: standard-multi-az
       protect_data:
         description: "Foundation layer only: real-data protection (deletion protection, final snapshot)"
         type: boolean
@@ -170,26 +173,28 @@ jobs:
         run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
 
       # ---- ECS with a real image: migrate the database BEFORE the new version is rolled out ----
-      # The new app version expects its login and schema to exist. If the service were updated first,
+      # The new API version expects its login and schema to exist. If the services were updated first,
       # healthy tasks would be replaced by tasks that cannot use the database, and a failed migration
       # would leave that broken version running. So: create only what the migration task needs,
-      # run it, and stop here if it fails. The running service has not been touched at that point.
+      # run it, and stop here if it fails. The running services have not been touched at that point.
+      # Order of one release: database migration -> backend API -> frontend.
       - name: Prepare the migration task (ECS)
         if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project == 'ecs' && inputs.image_tag != ''
         run: |
           terraform apply -auto-approve \
             -target='module.stack.module.app.aws_ecs_task_definition.migrate' \
-            -target='module.stack.aws_vpc_security_group_ingress_rule.db_from_app'
+            -target='module.stack.aws_vpc_security_group_ingress_rule.db_from_api'
 
       - name: Run the database migration (ECS)
         if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project == 'ecs' && inputs.image_tag != ''
         env:
           NAME: cm-ecs-${{ matrix.region }}
         run: |
+          # The migration runs where the backend API runs: the app subnets, with the API's security group.
           # Looked up by name rather than from Terraform outputs, which are not complete after a targeted apply.
           vpc=$(aws ec2 describe-vpcs --region "$DEPLOY_REGION" --filters "Name=tag:Name,Values=$NAME" --query 'Vpcs[0].VpcId' --output text)
           subnets=$(aws ec2 describe-subnets --region "$DEPLOY_REGION" --filters "Name=vpc-id,Values=$vpc" "Name=tag:Tier,Values=app" --query 'Subnets[].SubnetId' --output json | jq -c .)
-          group=$(aws ec2 describe-security-groups --region "$DEPLOY_REGION" --filters "Name=vpc-id,Values=$vpc" "Name=group-name,Values=$NAME-app" --query 'SecurityGroups[0].GroupId' --output text)
+          group=$(aws ec2 describe-security-groups --region "$DEPLOY_REGION" --filters "Name=vpc-id,Values=$vpc" "Name=group-name,Values=$NAME-api" --query 'SecurityGroups[0].GroupId' --output text)
           network="{\"awsvpcConfiguration\":{\"subnets\":$subnets,\"securityGroups\":[\"$group\"],\"assignPublicIp\":\"DISABLED\"}}"
 
           if [ "$vpc" = "None" ] || [ "$group" = "None" ] || [ "$subnets" = "[]" ]; then
@@ -305,29 +310,31 @@ jobs:
       # A plain "is the site up?" check is not enough: during a rolling deployment an old container
       # can answer while the new version is failing and being rolled back.
 
-      - name: Check the deployment finished on the requested version (ECS)
+      - name: Check both services finished on the requested version (ECS)
         if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project == 'ecs' && inputs.image_tag != ''
         run: |
           cluster=$(terraform output -raw cluster_name)
-          service=$(terraform output -raw service_name)
-          wanted=$(terraform output -raw task_definition_arn)
-          aws ecs wait services-stable --region "$DEPLOY_REGION" --cluster "$cluster" --services "$service"
-          read -r state running_def running desired < <(aws ecs describe-services --region "$DEPLOY_REGION" \
-            --cluster "$cluster" --services "$service" --output text \
-            --query "services[0].deployments[?status=='PRIMARY'] | [0].[rolloutState,taskDefinition,runningCount,desiredCount]")
-          echo "Rollout state: $state, running $running of $desired"
-          if [ "$running_def" != "$wanted" ]; then
-            echo "::error::The service is NOT running the requested version. ECS rolled back to the previous one."
-            exit 1
-          fi
-          if [ "$state" != "COMPLETED" ] || [ "$running" != "$desired" ]; then
-            echo "::error::The deployment did not complete (state $state, $running of $desired running)."
-            exit 1
-          fi
-          echo "The requested version is running on every task."
+          for service in api web; do
+            wanted=$(terraform output -raw "${service}_task_definition_arn")
+            aws ecs wait services-stable --region "$DEPLOY_REGION" --cluster "$cluster" --services "$service"
+            read -r state running_def running desired < <(aws ecs describe-services --region "$DEPLOY_REGION" \
+              --cluster "$cluster" --services "$service" --output text \
+              --query "services[0].deployments[?status=='PRIMARY'] | [0].[rolloutState,taskDefinition,runningCount,desiredCount]")
+            echo "$service: rollout state $state, running $running of $desired"
+            if [ "$running_def" != "$wanted" ]; then
+              echo "::error::The $service service is NOT running the requested version. ECS rolled back to the previous one."
+              exit 1
+            fi
+            if [ "$state" != "COMPLETED" ] || [ "$running" != "$desired" ]; then
+              echo "::error::The $service deployment did not complete (state $state, $running of $desired running)."
+              exit 1
+            fi
+          done
+          echo "The requested version is running on every frontend and API task."
 
-      # /ready makes the app query its database, and reports which version answered.
-      - name: Smoke test, including the database (ECS)
+      # /ready on the frontend calls the API, and the API queries its database, so one request
+      # tests the whole chain. The answer names the frontend version and the API version.
+      - name: Smoke test through all three tiers (ECS)
         if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project == 'ecs' && inputs.image_tag != ''
         env:
           WANTED: ${{ inputs.image_tag }}
@@ -336,18 +343,19 @@ jobs:
           echo "Checking $url"
           passes=0
           for attempt in $(seq 1 30); do
-            body=$(curl -s --max-time 10 "$url" || true)
+            body=$(curl -s --max-time 15 "$url" || true)
             status=$(echo "$body" | jq -r '.status // empty' 2>/dev/null || true)
             version=$(echo "$body" | jq -r '.version // empty' 2>/dev/null || true)
-            if [ "$status" = "ok" ] && [ "$version" = "$WANTED" ]; then
+            api_version=$(echo "$body" | jq -r '.api_version // empty' 2>/dev/null || true)
+            if [ "$status" = "ok" ] && [ "$version" = "$WANTED" ] && [ "$api_version" = "$WANTED" ]; then
               passes=$((passes+1))
-              # Five in a row, so both tasks behind the load balancer have very likely answered.
-              if [ "$passes" -ge 5 ]; then echo "Healthy on version $version with a working database"; exit 0; fi
+              # Five in a row, so every task behind both load balancers has very likely answered.
+              if [ "$passes" -ge 5 ]; then echo "Healthy: frontend $version -> API $api_version -> database"; exit 0; fi
               sleep 2
               continue
             fi
             passes=0
-            echo "Attempt $attempt: status='$status' version='$version', waiting 10 seconds"
+            echo "Attempt $attempt: status='$status' frontend='$version' api='$api_version', waiting 10 seconds"
             sleep 10
           done
           echo "::error::${{ matrix.region }} did not pass the smoke test. Later regions will not be deployed."
@@ -399,7 +407,7 @@ jobs:
           echo "No Kubernetes load balancers remain"
 
       # foundation: removes the network, the registry and the database WITH ITS DATA.
-      # app:        removes the load balancer, firewall and app tier. The data stays.
+      # app:        removes the load balancers, firewall, frontend and backend API. The data stays.
       - name: Destroy
         if: inputs.action == 'destroy'
         run: terraform destroy -auto-approve

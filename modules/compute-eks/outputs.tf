@@ -4,6 +4,8 @@ output "cluster_name" {
 
 # EKS attaches this security group to the control plane and to every managed node.
 # Pods use their node's network identity, so this is the group the database must allow.
+# That lets every pod reach the database at the network level. The NetworkPolicy rules in
+# k8s/app.yaml narrow it down so that only the backend API pods can.
 output "app_security_group_id" {
   value = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
 }

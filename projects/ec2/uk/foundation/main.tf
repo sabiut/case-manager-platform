@@ -29,20 +29,20 @@ provider "aws" {
   }
 }
 
-# Database settings. Defaults are the cheap lab setup (Express, one zone).
+# Database settings. Defaults are SQL Server Standard with a standby in a second zone.
 variable "db_engine" {
   type    = string
-  default = "sqlserver-ex"
+  default = "sqlserver-se"
 }
 
 variable "db_instance_class" {
   type    = string
-  default = "db.t3.micro"
+  default = "db.t3.xlarge"
 }
 
 variable "db_multi_az" {
   type    = bool
-  default = false
+  default = true
 }
 
 # false = lab (can be destroyed). true = real data (deletion protection and final snapshot).

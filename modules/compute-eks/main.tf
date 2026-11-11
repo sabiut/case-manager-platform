@@ -1,6 +1,8 @@
-# App tier on Kubernetes (EKS):
+# Web tier and application tier on Kubernetes (EKS):
 #   AWS runs the control plane, a managed node group runs the pods in the private app subnets.
-# The application itself is deployed with kubectl from the k8s/ folder, not with Terraform.
+# The frontend and the backend API are deployed with kubectl from the k8s/ folder, not with Terraform.
+# On Kubernetes both tiers share the same worker nodes, so the separation between them is done with
+# Kubernetes objects (an internal-only Service and NetworkPolicy rules), not with separate subnets.
 
 # ---- Control plane ----
 
@@ -40,6 +42,16 @@ resource "aws_eks_cluster" "this" {
   enabled_cluster_log_types = ["api", "audit", "authenticator"]
 
   depends_on = [aws_iam_role_policy_attachment.cluster]
+}
+
+# The AWS network plugin only enforces NetworkPolicy rules when this setting is on.
+# Without it the rules in k8s/app.yaml would be accepted and then silently ignored.
+resource "aws_eks_addon" "vpc_cni" {
+  cluster_name                = aws_eks_cluster.this.name
+  addon_name                  = "vpc-cni"
+  resolve_conflicts_on_create = "OVERWRITE" # the cluster starts with a default copy of this add-on
+  resolve_conflicts_on_update = "OVERWRITE"
+  configuration_values        = jsonencode({ enableNetworkPolicy = "true" })
 }
 
 # ---- Worker nodes ----
@@ -85,5 +97,5 @@ resource "aws_eks_node_group" "this" {
     max_unavailable = 1
   }
 
-  depends_on = [aws_iam_role_policy_attachment.node]
+  depends_on = [aws_iam_role_policy_attachment.node, aws_eks_addon.vpc_cni]
 }

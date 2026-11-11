@@ -8,12 +8,17 @@ variable "vpc_id" {
 }
 
 variable "public_subnet_ids" {
-  description = "Subnets for the load balancer"
+  description = "Subnets for the internet-facing load balancer"
+  type        = list(string)
+}
+
+variable "web_subnet_ids" {
+  description = "Private subnets for the frontend servers"
   type        = list(string)
 }
 
 variable "app_subnet_ids" {
-  description = "Private subnets for the servers"
+  description = "Private subnets for the internal load balancer and the backend API servers"
   type        = list(string)
 }
 
@@ -24,8 +29,9 @@ variable "instance_type" {
 }
 
 variable "min_size" {
-  type    = number
-  default = 2
+  description = "Servers per tier"
+  type        = number
+  default     = 2
 }
 
 variable "max_size" {
@@ -38,6 +44,6 @@ variable "db_host" {
 }
 
 variable "db_secret_arn" {
-  description = "Secret with the web app's restricted database login (never the admin login)"
+  description = "Secret with the API's restricted database login (never the admin login). Only the API servers may read it."
   type        = string
 }

@@ -15,12 +15,12 @@ variable "subnet_ids" {
 variable "engine" {
   description = "sqlserver-ex (Express, lab) or sqlserver-se (Standard, production)"
   type        = string
-  default     = "sqlserver-ex"
+  default     = "sqlserver-se"
 }
 
 variable "instance_class" {
   type    = string
-  default = "db.t3.micro"
+  default = "db.t3.xlarge"
 }
 
 variable "allocated_storage" {
@@ -32,7 +32,7 @@ variable "allocated_storage" {
 variable "multi_az" {
   description = "Standby copy in a second zone. Not available on Express edition."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "backup_retention_days" {

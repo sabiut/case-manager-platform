@@ -43,8 +43,9 @@ module "app" {
   app_subnet_ids    = data.aws_subnets.app.ids
 }
 
-# The only way into the database: SQL Server port, from the app tier's security group.
-# It belongs to the app layer, so destroying the app also closes the door.
+# The only way into the database: SQL Server port, from the worker nodes' security group.
+# Inside the cluster, NetworkPolicy rules (k8s/app.yaml) stop the frontend pods from using it.
+# The rule belongs to the app layer, so destroying the app also closes the door.
 resource "aws_vpc_security_group_ingress_rule" "db_from_app" {
   security_group_id            = data.aws_security_group.db.id
   referenced_security_group_id = module.app.app_security_group_id

@@ -43,6 +43,7 @@ module "stack" {
 
 output "url" { value = module.stack.url }
 output "cluster_name" { value = module.stack.cluster_name }
-output "service_name" { value = module.stack.service_name }
+output "api_internal_url" { value = module.stack.api_internal_url }
 output "log_group" { value = module.stack.log_group }
-output "task_definition_arn" { value = module.stack.task_definition_arn }
+output "web_task_definition_arn" { value = module.stack.web_task_definition_arn }
+output "api_task_definition_arn" { value = module.stack.api_task_definition_arn }

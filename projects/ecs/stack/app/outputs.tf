@@ -3,18 +3,23 @@ output "url" {
   value       = module.app.url
 }
 
-output "cluster_name" {
-  value = module.app.cluster_name
+output "api_internal_url" {
+  description = "The backend API. Reachable only from inside the VPC."
+  value       = module.app.api_internal_url
 }
 
-output "service_name" {
-  value = module.app.service_name
+output "cluster_name" {
+  value = module.app.cluster_name
 }
 
 output "log_group" {
   value = module.app.log_group
 }
 
-output "task_definition_arn" {
-  value = module.app.task_definition_arn
+output "web_task_definition_arn" {
+  value = module.app.web_task_definition_arn
+}
+
+output "api_task_definition_arn" {
+  value = module.app.api_task_definition_arn
 }

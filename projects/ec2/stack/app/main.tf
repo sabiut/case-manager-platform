@@ -1,4 +1,4 @@
-# APP layer: load balancer + Windows servers with IIS. Safe to destroy and rebuild.
+# APP layer: load balancers + frontend and backend API Windows servers with IIS. Safe to destroy and rebuild.
 
 locals {
   name = "cm-ec2-${var.region_code}"
@@ -17,6 +17,14 @@ data "aws_subnets" "public" {
     values = [data.aws_vpc.this.id]
   }
   tags = { Tier = "public" }
+}
+
+data "aws_subnets" "web" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.this.id]
+  }
+  tags = { Tier = "web" }
 }
 
 data "aws_subnets" "app" {
@@ -45,23 +53,25 @@ module "app" {
   name              = local.name
   vpc_id            = data.aws_vpc.this.id
   public_subnet_ids = data.aws_subnets.public.ids
+  web_subnet_ids    = data.aws_subnets.web.ids
   app_subnet_ids    = data.aws_subnets.app.ids
   db_host           = data.aws_db_instance.this.address
   db_secret_arn     = data.aws_secretsmanager_secret.app_db.arn
 }
 
-# The only way into the database: SQL Server port, from the app tier's security group.
-# It belongs to the app layer, so destroying the app also closes the door.
-resource "aws_vpc_security_group_ingress_rule" "db_from_app" {
+# The only way into the database: SQL Server port, from the backend API's security group.
+# The frontend is not on this list, so it cannot connect to the database even if it tried.
+# The rule belongs to the app layer, so destroying the app also closes the door.
+resource "aws_vpc_security_group_ingress_rule" "db_from_api" {
   security_group_id            = data.aws_security_group.db.id
-  referenced_security_group_id = module.app.app_security_group_id
+  referenced_security_group_id = module.app.api_security_group_id
   ip_protocol                  = "tcp"
   from_port                    = 1433
   to_port                      = 1433
-  description                  = "SQL Server from the app tier"
+  description                  = "SQL Server from the backend API"
 }
 
-# Web application firewall in front of the load balancer.
+# Web application firewall in front of the public load balancer.
 module "waf" {
   source            = "../../../../modules/waf"
   name              = local.name

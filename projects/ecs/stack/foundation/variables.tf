@@ -11,18 +11,18 @@ variable "cidr" {
 variable "db_engine" {
   description = "sqlserver-ex (Express) or sqlserver-se (Standard)"
   type        = string
-  default     = "sqlserver-ex"
+  default     = "sqlserver-se"
 }
 
 variable "db_instance_class" {
   type    = string
-  default = "db.t3.micro"
+  default = "db.t3.xlarge"
 }
 
 variable "db_multi_az" {
   description = "Needs Standard edition. Express does not support it."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "protect_data" {

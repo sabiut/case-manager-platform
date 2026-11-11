@@ -35,4 +35,5 @@ module "stack" {
 }
 
 output "url" { value = module.stack.url }
-output "autoscaling_group" { value = module.stack.autoscaling_group }
+output "api_internal_url" { value = module.stack.api_internal_url }
+output "autoscaling_groups" { value = module.stack.autoscaling_groups }

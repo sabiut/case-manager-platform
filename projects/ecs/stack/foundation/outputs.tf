@@ -18,6 +18,10 @@ output "migration_bucket" {
   value = module.database.migration_bucket
 }
 
-output "ecr_repository_url" {
-  value = module.registry.repository_url
+output "ecr_web_repository_url" {
+  value = module.registry_web.repository_url
+}
+
+output "ecr_api_repository_url" {
+  value = module.registry_api.repository_url
 }

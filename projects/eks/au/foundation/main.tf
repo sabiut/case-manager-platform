@@ -29,20 +29,20 @@ provider "aws" {
   }
 }
 
-# Database settings. Defaults are the cheap lab setup (Express, one zone).
+# Database settings. Defaults are SQL Server Standard with a standby in a second zone.
 variable "db_engine" {
   type    = string
-  default = "sqlserver-ex"
+  default = "sqlserver-se"
 }
 
 variable "db_instance_class" {
   type    = string
-  default = "db.t3.micro"
+  default = "db.t3.xlarge"
 }
 
 variable "db_multi_az" {
   type    = bool
-  default = false
+  default = true
 }
 
 # false = lab (can be destroyed). true = real data (deletion protection and final snapshot).
@@ -66,4 +66,5 @@ output "db_address" { value = module.stack.db_address }
 output "db_secret_arn" { value = module.stack.db_secret_arn }
 output "app_db_secret_arn" { value = module.stack.app_db_secret_arn }
 output "migration_bucket" { value = module.stack.migration_bucket }
-output "ecr_repository_url" { value = module.stack.ecr_repository_url }
+output "ecr_web_repository_url" { value = module.stack.ecr_web_repository_url }
+output "ecr_api_repository_url" { value = module.stack.ecr_api_repository_url }

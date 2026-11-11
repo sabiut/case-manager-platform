@@ -1,14 +1,15 @@
-# Builds the app image once, scans it, and pushes that same image to each region's registry.
-#   On a push that changes app/:  build and scan only (no AWS access needed).
-#   Started by hand:              also push to the registries, ready for the deploy workflow.
+# Builds the two app images (frontend and backend API) once, scans them, and pushes those same
+# images to each region's registries. Both get the same tag, so one tag means one release.
+#   On a push that changes frontend/ or backend/:  build and scan only (no AWS access needed).
+#   Started by hand:                               also push to the registries, ready for the deploy workflow.
 name: build
 
 on:
   push:
     branches: [main]
-    paths: [app/**]
+    paths: [frontend/**, backend/**]
   pull_request:
-    paths: [app/**]
+    paths: [frontend/**, backend/**]
   workflow_dispatch:
     inputs:
       project:
@@ -33,24 +34,37 @@ jobs:
       - id: tag
         run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+      # web = frontend/ folder, api = backend/ folder (which also holds the database migration).
       - name: Build
-        run: docker build -t app:${{ steps.tag.outputs.tag }} --build-arg APP_VERSION=${{ steps.tag.outputs.tag }} app
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          docker build -t "web:$TAG" --build-arg APP_VERSION="$TAG" frontend
+          docker build -t "api:$TAG" --build-arg APP_VERSION="$TAG" backend
 
       # Report only for now. Change --exit-code to 1 to stop the pipeline on a fixable serious finding.
       - name: Vulnerability scan (operating system packages and Python libraries)
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image \
-            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 app:${{ steps.tag.outputs.tag }}
+          for image in web api; do
+            echo "::group::$image"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image \
+              --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 "$image:$TAG"
+            echo "::endgroup::"
+          done
 
-      - name: Save the image for the publish job
+      - name: Save the images for the publish job
         if: github.event_name == 'workflow_dispatch'
-        run: docker save app:${{ steps.tag.outputs.tag }} | gzip > image.tar.gz
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: docker save "web:$TAG" "api:$TAG" | gzip > images.tar.gz
 
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'workflow_dispatch'
         with:
-          name: image
-          path: image.tar.gz
+          name: images
+          path: images.tar.gz
           retention-days: 1
 
   publish:
@@ -68,10 +82,10 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: image
+          name: images
 
-      # The exact image that was scanned, not a rebuild.
-      - run: docker load < image.tar.gz
+      # The exact images that were scanned, not a rebuild.
+      - run: docker load < images.tar.gz
 
       - name: Sign in to AWS (no stored keys)
         uses: aws-actions/configure-aws-credentials@v4
@@ -80,31 +94,37 @@ jobs:
           aws-region: ap-southeast-2
           mask-aws-account-id: true
 
-      - name: Push to every region that has a registry
+      # A region counts only when BOTH images are there, so a release is never half published.
+      - name: Push to every region that has registries
         run: |
           pushed=""
           for pair in au:ap-southeast-2 uk:eu-west-2 us:us-east-1; do
-            code=${pair%%:*}; region=${pair##*:}; repo="cm-$PROJECT-$code"
-            if ! uri=$(aws ecr describe-repositories --region "$region" --repository-names "$repo" \
-                         --query 'repositories[0].repositoryUri' --output text 2>/dev/null); then
-              echo "$code: no registry yet (deploy the foundation layer there first), skipped"
+            code=${pair%%:*}; region=${pair##*:}
+            if ! aws ecr describe-repositories --region "$region" \
+                   --repository-names "cm-$PROJECT-$code-web" "cm-$PROJECT-$code-api" >/dev/null 2>&1; then
+              echo "$code: registries not found (deploy the foundation layer there first), skipped"
               continue
             fi
-            if aws ecr describe-images --region "$region" --repository-name "$repo" --image-ids imageTag="$TAG" >/dev/null 2>&1; then
-              echo "$code: tag $TAG is already there"
-            else
-              aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin "${uri%%/*}"
-              docker tag "app:$TAG" "$uri:$TAG"
-              docker push "$uri:$TAG"
-            fi
+            for image in web api; do
+              repo="cm-$PROJECT-$code-$image"
+              uri=$(aws ecr describe-repositories --region "$region" --repository-names "$repo" \
+                      --query 'repositories[0].repositoryUri' --output text)
+              if aws ecr describe-images --region "$region" --repository-name "$repo" --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+                echo "$code $image: tag $TAG is already there"
+              else
+                aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin "${uri%%/*}"
+                docker tag "$image:$TAG" "$uri:$TAG"
+                docker push "$uri:$TAG"
+              fi
+            done
             pushed="$pushed $code"
           done
           if [ -z "$pushed" ]; then
-            echo "::error::No registry found in any region for project $PROJECT"
+            echo "::error::No registries found in any region for project $PROJECT"
             exit 1
           fi
           {
             echo "### Image tag: \`$TAG\`"
-            echo "Available in:$pushed"
+            echo "Frontend and backend API images are available in:$pushed"
             echo "Use this tag in the **deploy** workflow (layer: app, image tag: $TAG)."
           } >> "$GITHUB_STEP_SUMMARY"

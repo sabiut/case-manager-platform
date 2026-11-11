@@ -1,5 +1,5 @@
 # FOUNDATION layer: the slow, long-lived parts of a region. Created once, changed rarely.
-#   network + database + image registry
+#   network + database + image registries
 # It has its own state file, so deploying or destroying the app layer can never touch the data.
 
 locals {
@@ -23,7 +23,13 @@ module "database" {
   protect_data   = var.protect_data
 }
 
-module "registry" {
+# One registry per image: the frontend and the backend API are built and versioned separately.
+module "registry_web" {
   source = "../../../../modules/registry"
-  name   = local.name
+  name   = "${local.name}-web"
+}
+
+module "registry_api" {
+  source = "../../../../modules/registry"
+  name   = "${local.name}-api"
 }
