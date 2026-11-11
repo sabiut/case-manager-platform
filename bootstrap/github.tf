@@ -91,6 +91,7 @@ resource "aws_iam_role_policy" "github_publish" {
           "ecr:DescribeRepositories",
           "ecr:DescribeImages",
           "ecr:BatchCheckLayerAvailability",
+          "ecr:BatchGetImage", # docker push reads the image manifest back to confirm it; without this the push ends in 403
           "ecr:InitiateLayerUpload",
           "ecr:UploadLayerPart",
           "ecr:CompleteLayerUpload",
