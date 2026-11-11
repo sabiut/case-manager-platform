@@ -37,6 +37,10 @@ on:
         type: choice
         options: [none, au, uk, us]
         default: none
+      confirm_destroy:
+        description: To destroy, type the word destroy here (safety check)
+        type: string
+        default: ""
       db_engine:
         description: Database edition (sqlserver-se is needed for Multi-AZ)
         type: choice
@@ -74,6 +78,10 @@ jobs:
           SECOND: ${{ inputs.second }}
           THIRD: ${{ inputs.third }}
         run: |
+          if [ "${{ inputs.action }}" = "destroy" ] && [ "${{ inputs.confirm_destroy }}" != "destroy" ]; then
+            echo "::error::Destroy was chosen but the confirmation box does not say 'destroy'. Nothing was changed."
+            exit 1
+          fi
           list=()
           for region in "$FIRST" "$SECOND" "$THIRD"; do
             [ "$region" = "none" ] && continue
@@ -161,6 +169,21 @@ jobs:
           echo "::error::${{ matrix.region }} did not become healthy. Later regions will not be deployed."
           exit 1
 
+      # Kubernetes creates its own load balancer outside Terraform. Remove it first,
+      # otherwise the network cannot be deleted while the load balancer still uses it.
+      - name: Remove the Kubernetes app (EKS only)
+        if: inputs.action == 'destroy' && inputs.project == 'eks'
+        working-directory: .
+        run: |
+          regions='{"au":"ap-southeast-2","uk":"eu-west-2","us":"us-east-1"}'
+          aws_region=$(echo "$regions" | jq -r '."${{ matrix.region }}"')
+          if aws eks update-kubeconfig --name "cm-eks-${{ matrix.region }}" --region "$aws_region"; then
+            kubectl delete -f k8s/app.yaml --ignore-not-found --timeout=5m || true
+          else
+            echo "No cluster found, nothing to remove"
+          fi
+
+      # Removes everything in this region: app tier, database (with its data) and network.
       - name: Destroy
         if: inputs.action == 'destroy'
         run: terraform destroy -auto-approve
