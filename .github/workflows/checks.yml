@@ -1,0 +1,48 @@
+# Runs on every pull request and every push to main. Needs no AWS access.
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name: format and validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.17.1
+
+      - name: Formatting
+        run: terraform fmt -check -recursive
+
+      - name: Validate every project in every region
+        run: |
+          for dir in projects/*/au projects/*/uk projects/*/us; do
+            echo "::group::$dir"
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+            echo "::endgroup::"
+          done
+
+  security:
+    name: security scans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history, so secrets committed in the past are found too
+
+      - name: Secrets scan (passwords or keys committed to git)
+        run: docker run --rm -v "$PWD:/src" zricethezav/gitleaks:latest detect --source /src --redact
+
+      # Report only for now (exit code 0). Once the findings are reviewed, change to --exit-code 1
+      # so a risky change fails the build.
+      - name: Terraform scan (open security groups, unencrypted storage)
+        run: docker run --rm -v "$PWD:/src" aquasec/trivy:latest config --severity HIGH,CRITICAL --exit-code 0 /src

@@ -1,0 +1,49 @@
+variable "name" {
+  description = "Prefix for every resource name, for example cm-ecs-au"
+  type        = string
+}
+
+variable "vpc_id" {
+  type = string
+}
+
+variable "public_subnet_ids" {
+  description = "Subnets for the load balancer"
+  type        = list(string)
+}
+
+variable "app_subnet_ids" {
+  description = "Private subnets for the containers"
+  type        = list(string)
+}
+
+variable "image" {
+  description = "Container image to run. Empty means a placeholder web server until the real app is pushed."
+  type        = string
+  default     = ""
+}
+
+variable "container_port" {
+  type    = number
+  default = 80
+}
+
+variable "health_check_path" {
+  type    = string
+  default = "/"
+}
+
+variable "desired_count" {
+  description = "How many copies of the app to run. Two or more, so one zone can fail."
+  type        = number
+  default     = 2
+}
+
+variable "db_host" {
+  type = string
+}
+
+variable "db_secret_arn" {
+  description = "Secrets Manager secret with the database username and password"
+  type        = string
+}
