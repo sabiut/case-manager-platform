@@ -409,6 +409,49 @@ jobs:
           fi
           echo "No Kubernetes load balancers remain"
 
+      # A foundation destroy that starts in the wrong conditions fails halfway and leaves the region
+      # half removed (no NAT gateway, no registries, but the network and database still there).
+      # So check first, and stop BEFORE anything is deleted:
+      #   1. The app layer must already be gone. Its load balancers and servers sit in the foundation's
+      #      subnets, and AWS refuses to delete a subnet that has something in it.
+      #   2. The database must not have deletion protection on. Terraform cannot delete a protected database.
+      - name: Check the foundation is safe to destroy
+        if: inputs.action == 'destroy' && inputs.layer == 'foundation'
+        env:
+          NAME: cm-${{ inputs.project }}-${{ matrix.region }}
+          PROJECT: ${{ inputs.project }}
+        run: |
+          # Prints "yes" if the thing exists, "no" if AWS says it does not. Any other error stops the job.
+          exists() {
+            local not_found="$1"; shift
+            local out
+            if out=$("$@" 2>&1); then echo yes; return 0; fi
+            if grep -q "$not_found" <<<"$out"; then echo no; return 0; fi
+            echo "::error::Could not check: $out" >&2
+            return 1
+          }
+
+          if [ "$PROJECT" = "eks" ]; then
+            app=$(exists ResourceNotFoundException aws eks describe-cluster --region "$DEPLOY_REGION" --name "$NAME")
+          else
+            app=$(exists LoadBalancerNotFound aws elbv2 describe-load-balancers --region "$DEPLOY_REGION" --names "$NAME")
+          fi
+          if [ "$app" = "yes" ]; then
+            echo "::error::The app layer of $NAME still exists. Destroy the app layer first (layer: app, action: destroy), then the foundation. Nothing was deleted."
+            exit 1
+          fi
+
+          db=$(exists DBInstanceNotFound aws rds describe-db-instances --region "$DEPLOY_REGION" --db-instance-identifier "$NAME")
+          if [ "$db" = "yes" ]; then
+            protected=$(aws rds describe-db-instances --region "$DEPLOY_REGION" --db-instance-identifier "$NAME" \
+              --query 'DBInstances[0].DeletionProtection' --output text)
+            if [ "$protected" = "True" ]; then
+              echo "::error::The database $NAME has deletion protection on. If you really mean to delete it, first run this workflow with layer: foundation, action: apply and the protection box unticked, then destroy. Nothing was deleted."
+              exit 1
+            fi
+          fi
+          echo "The app layer is gone and the database is not protected. Safe to destroy."
+
       # foundation: removes the network, the registry and the database WITH ITS DATA.
       # app:        removes the load balancers, firewall, frontend and backend API. The data stays.
       - name: Destroy
