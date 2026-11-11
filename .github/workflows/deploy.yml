@@ -53,6 +53,10 @@ on:
         description: "App layer, ECS only: image tag from the build workflow (empty = placeholder page)"
         type: string
         default: ""
+      run_migration:
+        description: "App layer, ECS only: run the database migration first. Untick when rolling back to an older image"
+        type: boolean
+        default: true
       database:
         description: "Foundation layer only: database setup"
         type: choice
@@ -178,15 +182,21 @@ jobs:
       # would leave that broken version running. So: create only what the migration task needs,
       # run it, and stop here if it fails. The running services have not been touched at that point.
       # Order of one release: database migration -> backend API -> frontend.
+      #
+      # Rolling back is different. A rollback deploys an OLDER image, and its migration must not run:
+      # the schema only moves forward (new things are added first, old things removed in a later
+      # release), so the current schema already works for the previous version. An older image may
+      # also start its migration differently, or not have one at all. For a rollback, untick
+      # "run the database migration": the two steps below are skipped and only the services change.
       - name: Prepare the migration task (ECS)
-        if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project == 'ecs' && inputs.image_tag != ''
+        if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project == 'ecs' && inputs.image_tag != '' && inputs.run_migration
         run: |
           terraform apply -auto-approve \
             -target='module.stack.module.app.aws_ecs_task_definition.migrate' \
             -target='module.stack.aws_vpc_security_group_ingress_rule.db_from_api'
 
       - name: Run the database migration (ECS)
-        if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project == 'ecs' && inputs.image_tag != ''
+        if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project == 'ecs' && inputs.image_tag != '' && inputs.run_migration
         env:
           NAME: cm-ecs-${{ matrix.region }}
         run: |
@@ -412,45 +422,46 @@ jobs:
       # A foundation destroy that starts in the wrong conditions fails halfway and leaves the region
       # half removed (no NAT gateway, no registries, but the network and database still there).
       # So check first, and stop BEFORE anything is deleted:
-      #   1. The app layer must already be gone. Its load balancers and servers sit in the foundation's
-      #      subnets, and AWS refuses to delete a subnet that has something in it.
+      #   1. Nothing from the app layer may be left in the network. AWS refuses to delete a subnet that
+      #      has something in it. Checking one named resource (such as the public load balancer) is not
+      #      enough: after a failed deploy or a partial teardown it can be gone while an internal load
+      #      balancer, tasks or servers remain. So the check looks at what is actually in the subnets:
+      #      every network interface in the VPC that is not the foundation's own (database, NAT gateway).
       #   2. The database must not have deletion protection on. Terraform cannot delete a protected database.
       - name: Check the foundation is safe to destroy
         if: inputs.action == 'destroy' && inputs.layer == 'foundation'
         env:
           NAME: cm-${{ inputs.project }}-${{ matrix.region }}
-          PROJECT: ${{ inputs.project }}
         run: |
-          # Prints "yes" if the thing exists, "no" if AWS says it does not. Any other error stops the job.
-          exists() {
-            local not_found="$1"; shift
-            local out
-            if out=$("$@" 2>&1); then echo yes; return 0; fi
-            if grep -q "$not_found" <<<"$out"; then echo no; return 0; fi
-            echo "::error::Could not check: $out" >&2
-            return 1
-          }
-
-          if [ "$PROJECT" = "eks" ]; then
-            app=$(exists ResourceNotFoundException aws eks describe-cluster --region "$DEPLOY_REGION" --name "$NAME")
+          # A failed lookup stops the job (bash error-exit): never destroy on a check that did not run.
+          vpc=$(aws ec2 describe-vpcs --region "$DEPLOY_REGION" --filters "Name=tag:Name,Values=$NAME" \
+            --query 'Vpcs[0].VpcId' --output text)
+          if [ "$vpc" = "None" ] || [ -z "$vpc" ]; then
+            echo "No network named $NAME exists, so nothing from the app layer can be in it."
           else
-            app=$(exists LoadBalancerNotFound aws elbv2 describe-load-balancers --region "$DEPLOY_REGION" --names "$NAME")
-          fi
-          if [ "$app" = "yes" ]; then
-            echo "::error::The app layer of $NAME still exists. Destroy the app layer first (layer: app, action: destroy), then the foundation. Nothing was deleted."
-            exit 1
+            in_use=$(aws ec2 describe-network-interfaces --region "$DEPLOY_REGION" --filters "Name=vpc-id,Values=$vpc" \
+              --query "NetworkInterfaces[?InterfaceType!='nat_gateway' && Description!='RDSNetworkInterface'].[NetworkInterfaceId,InterfaceType,Description]" \
+              --output text)
+            if [ -n "$in_use" ]; then
+              echo "Still in the network:"
+              echo "$in_use"
+              echo "::error::The network of $NAME is still in use by the app layer (listed above). Destroy the app layer first (layer: app, action: destroy), then the foundation. Nothing was deleted."
+              exit 1
+            fi
+            echo "Nothing from the app layer is left in the network."
           fi
 
-          db=$(exists DBInstanceNotFound aws rds describe-db-instances --region "$DEPLOY_REGION" --db-instance-identifier "$NAME")
-          if [ "$db" = "yes" ]; then
-            protected=$(aws rds describe-db-instances --region "$DEPLOY_REGION" --db-instance-identifier "$NAME" \
-              --query 'DBInstances[0].DeletionProtection' --output text)
-            if [ "$protected" = "True" ]; then
+          if db=$(aws rds describe-db-instances --region "$DEPLOY_REGION" --db-instance-identifier "$NAME" \
+                    --query 'DBInstances[0].DeletionProtection' --output text 2>db.err); then
+            if [ "$db" = "True" ]; then
               echo "::error::The database $NAME has deletion protection on. If you really mean to delete it, first run this workflow with layer: foundation, action: apply and the protection box unticked, then destroy. Nothing was deleted."
               exit 1
             fi
+          elif ! grep -q DBInstanceNotFound db.err; then
+            echo "::error::Could not check the database: $(cat db.err)"
+            exit 1
           fi
-          echo "The app layer is gone and the database is not protected. Safe to destroy."
+          echo "Safe to destroy."
 
       # foundation: removes the network, the registry and the database WITH ITS DATA.
       # app:        removes the load balancers, firewall, frontend and backend API. The data stays.
