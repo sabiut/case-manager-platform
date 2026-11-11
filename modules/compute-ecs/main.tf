@@ -456,3 +456,18 @@ resource "aws_ecs_service" "web" {
   # So within one release: database migration, then API, then frontend.
   depends_on = [aws_lb_listener.web, aws_ecs_service.api]
 }
+
+# ---- Renames ----
+# These resources kept their AWS names but got new names in this code when the app was split into
+# frontend and API. A "moved" block tells Terraform it is the same resource under a new address,
+# so a region deployed with the old layout keeps its public load balancer (and its web address)
+# instead of having it destroyed and created again. On a region that was never deployed they do nothing.
+moved {
+  from = aws_lb.this
+  to   = aws_lb.web
+}
+
+moved {
+  from = aws_lb_listener.http
+  to   = aws_lb_listener.web
+}

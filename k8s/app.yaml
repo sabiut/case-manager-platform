@@ -16,6 +16,12 @@
 #   aws eks update-kubeconfig --name cm-eks-au --region ap-southeast-2
 #   kubectl apply -f k8s/app.yaml
 #   kubectl get service case-manager-web     (the EXTERNAL-IP column is the address to open)
+#
+# Upgrading a cluster that still runs the earlier single "case-manager" app: apply this file, wait for
+# the new frontend to answer, then remove the old objects (kubectl apply never deletes what left the file):
+#   kubectl rollout status deployment/case-manager-api
+#   kubectl rollout status deployment/case-manager-web
+#   kubectl delete service/case-manager deployment/case-manager
 
 # ---------- Tier 1: frontend ----------
 apiVersion: apps/v1

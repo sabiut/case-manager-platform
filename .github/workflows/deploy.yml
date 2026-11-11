@@ -398,6 +398,9 @@ jobs:
           fi
           aws eks update-kubeconfig --region "$DEPLOY_REGION" --name "$cluster"
           kubectl delete -f k8s/app.yaml --ignore-not-found --wait --timeout=10m
+          # Objects from the layout before the frontend/API split. They are no longer in the manifest,
+          # so the line above does not remove them. Their load balancer would block the teardown.
+          kubectl delete service/case-manager deployment/case-manager --ignore-not-found --wait --timeout=10m
           left=$(kubectl get services --all-namespaces -o json | jq '[.items[] | select(.spec.type == "LoadBalancer")] | length')
           if [ "$left" != "0" ]; then
             echo "::error::$left Kubernetes load balancer service(s) still exist. Remove them before destroying the cluster."

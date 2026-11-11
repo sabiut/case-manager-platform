@@ -319,3 +319,18 @@ resource "aws_autoscaling_policy" "cpu" {
     target_value = 60
   }
 }
+
+# ---- Renames ----
+# These resources kept their AWS names but got new names in this code when the servers were split into
+# frontend and API. A "moved" block tells Terraform it is the same resource under a new address,
+# so a region deployed with the old layout keeps its public load balancer (and its web address)
+# instead of having it destroyed and created again. On a region that was never deployed they do nothing.
+moved {
+  from = aws_lb.this
+  to   = aws_lb.web
+}
+
+moved {
+  from = aws_lb_listener.http
+  to   = aws_lb_listener.tier["web"]
+}
