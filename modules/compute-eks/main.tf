@@ -87,12 +87,3 @@ resource "aws_eks_node_group" "this" {
 
   depends_on = [aws_iam_role_policy_attachment.node]
 }
-
-# ---- Image registry for this region ----
-
-resource "aws_ecr_repository" "app" {
-  name         = var.name
-  force_delete = true # lab only
-
-  image_scanning_configuration { scan_on_push = true }
-}

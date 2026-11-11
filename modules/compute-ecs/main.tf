@@ -93,15 +93,6 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-# ---- Image registry (ECR is per region, so each region has its own) ----
-
-resource "aws_ecr_repository" "app" {
-  name         = var.name
-  force_delete = true # lab only
-
-  image_scanning_configuration { scan_on_push = true }
-}
-
 # ---- IAM roles (IAM is global: var.name carries the region code so names never clash) ----
 
 data "aws_iam_policy_document" "ecs_assume" {
@@ -178,6 +169,8 @@ resource "aws_ecs_task_definition" "app" {
 
     environment = [
       { name = "DB_HOST", value = var.db_host },
+      { name = "DB_NAME", value = var.db_name },
+      { name = "REGION_CODE", value = var.region_code },
       { name = "AWS_REGION_NAME", value = data.aws_region.current.region }
     ]
 

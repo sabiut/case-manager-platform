@@ -7,7 +7,3 @@ output "cluster_name" {
 output "app_security_group_id" {
   value = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
 }
-
-output "ecr_repository_url" {
-  value = aws_ecr_repository.app.repository_url
-}

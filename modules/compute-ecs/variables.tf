@@ -47,3 +47,14 @@ variable "db_secret_arn" {
   description = "Secrets Manager secret with the database username and password"
   type        = string
 }
+
+variable "db_name" {
+  description = "The customer database the app reads"
+  type        = string
+  default     = "demo"
+}
+
+variable "region_code" {
+  description = "au, uk or us. Shown on the app page."
+  type        = string
+}

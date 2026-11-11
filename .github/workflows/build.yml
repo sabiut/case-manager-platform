@@ -1,0 +1,110 @@
+# Builds the app image once, scans it, and pushes that same image to each region's registry.
+#   On a push that changes app/:  build and scan only (no AWS access needed).
+#   Started by hand:              also push to the registries, ready for the deploy workflow.
+name: build
+
+on:
+  push:
+    branches: [main]
+    paths: [app/**]
+  pull_request:
+    paths: [app/**]
+  workflow_dispatch:
+    inputs:
+      project:
+        description: Which project's registries to push to
+        type: choice
+        options: [ecs, eks]
+        default: ecs
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: build and scan
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The tag is the commit ID, so every image can be traced back to the exact code.
+      - id: tag
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: docker build -t app:${{ steps.tag.outputs.tag }} --build-arg APP_VERSION=${{ steps.tag.outputs.tag }} app
+
+      # Report only for now. Change --exit-code to 1 to stop the pipeline on a fixable serious finding.
+      - name: Vulnerability scan (operating system packages and Python libraries)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 0 app:${{ steps.tag.outputs.tag }}
+
+      - name: Save the image for the publish job
+        if: github.event_name == 'workflow_dispatch'
+        run: docker save app:${{ steps.tag.outputs.tag }} | gzip > image.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: image
+          path: image.tar.gz
+          retention-days: 1
+
+  publish:
+    name: push to registries
+    if: github.event_name == 'workflow_dispatch'
+    needs: image
+    runs-on: ubuntu-latest
+    environment: build
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      TAG: ${{ needs.image.outputs.tag }}
+      PROJECT: ${{ inputs.project }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+
+      # The exact image that was scanned, not a rebuild.
+      - run: docker load < image.tar.gz
+
+      - name: Sign in to AWS (no stored keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-southeast-2
+          mask-aws-account-id: true
+
+      - name: Push to every region that has a registry
+        run: |
+          pushed=""
+          for pair in au:ap-southeast-2 uk:eu-west-2 us:us-east-1; do
+            code=${pair%%:*}; region=${pair##*:}; repo="cm-$PROJECT-$code"
+            if ! uri=$(aws ecr describe-repositories --region "$region" --repository-names "$repo" \
+                         --query 'repositories[0].repositoryUri' --output text 2>/dev/null); then
+              echo "$code: no registry yet (deploy the foundation layer there first), skipped"
+              continue
+            fi
+            if aws ecr describe-images --region "$region" --repository-name "$repo" --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+              echo "$code: tag $TAG is already there"
+            else
+              aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin "${uri%%/*}"
+              docker tag "app:$TAG" "$uri:$TAG"
+              docker push "$uri:$TAG"
+            fi
+            pushed="$pushed $code"
+          done
+          if [ -z "$pushed" ]; then
+            echo "::error::No registry found in any region for project $PROJECT"
+            exit 1
+          fi
+          {
+            echo "### Image tag: \`$TAG\`"
+            echo "Available in:$pushed"
+            echo "Use this tag in the **deploy** workflow (layer: app, image tag: $TAG)."
+          } >> "$GITHUB_STEP_SUMMARY"

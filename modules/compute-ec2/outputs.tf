@@ -9,3 +9,7 @@ output "app_security_group_id" {
 output "autoscaling_group" {
   value = aws_autoscaling_group.app.name
 }
+
+output "load_balancer_arn" {
+  value = aws_lb.this.arn
+}

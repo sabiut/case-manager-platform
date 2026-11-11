@@ -1,13 +1,16 @@
-# Usage:  make plan P=ecs R=au     (P = project: ecs, ec2, eks   R = region: au, uk, us)
+# Usage:  make plan P=ecs R=au L=foundation
+#   P = project: ecs, ec2, eks      R = region: au, uk, us      L = layer: foundation, app
+# Deploy order: foundation first, then app. Destroy order: app first, then foundation.
 P ?= ecs
 R ?= au
-DIR = projects/$(P)/$(R)
+L ?= foundation
+DIR = projects/$(P)/$(R)/$(L)
 
 bootstrap:
 	cd bootstrap && terraform init && terraform apply
 
 init:
-	cd $(DIR) && terraform init -backend-config=../../../backend.hcl
+	cd $(DIR) && terraform init -backend-config=../../../../backend.hcl
 
 plan: init
 	cd $(DIR) && terraform plan

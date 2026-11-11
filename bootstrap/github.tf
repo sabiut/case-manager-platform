@@ -28,10 +28,11 @@ resource "aws_iam_role" "github_actions" {
       Condition = {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-          # Only deploy jobs that run in the au, uk or us environment of this repository.
+          # Only jobs that run in one of these environments of this repository:
+          #   au, uk, us = deploy to that region      build = push images to the registries
           # Pull requests, forks and any other workflow get no AWS access at all.
           "token.actions.githubusercontent.com:sub" = [
-            for env in ["au", "uk", "us"] : "repo:${var.github_repo}:environment:${env}"
+            for env in ["au", "uk", "us", "build"] : "repo:${var.github_repo}:environment:${env}"
           ]
         }
       }

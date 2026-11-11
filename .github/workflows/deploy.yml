@@ -1,12 +1,16 @@
-# Deploys one project to the regions you choose, in the order you choose, one region at a time.
+# Deploys one layer of one project to the regions you choose, in the order you choose, one region at a time.
 # Started by hand from the Actions tab.
+#
+#   Layer foundation = network + database + image registry. Slow (about 25 minutes), done once per region.
+#   Layer app        = load balancer + firewall + app tier. Fast, deploy and destroy as often as you like.
+#
+#   Deploy order:  foundation, then (build workflow), then app.
+#   Destroy order: app first, then foundation.
 #
 #   First region  = deployed first.
 #   Second region = starts only after the first has finished and passed its health check.
 #   Third region  = starts only after the second has finished and passed its health check.
-#
-# Leave second and third on "none" to deploy a single region.
-# If any region fails, the regions after it are not touched.
+#   If any region fails, the regions after it are not touched.
 name: deploy
 
 on:
@@ -17,6 +21,11 @@ on:
         type: choice
         options: [ecs, ec2, eks]
         default: ecs
+      layer:
+        description: Which layer
+        type: choice
+        options: [foundation, app]
+        default: foundation
       action:
         description: What to do
         type: choice
@@ -37,31 +46,27 @@ on:
         type: choice
         options: [none, au, uk, us]
         default: none
+      image_tag:
+        description: "App layer, ECS only: image tag from the build workflow (empty = placeholder page)"
+        type: string
+        default: ""
+      database:
+        description: "Foundation layer only: database setup"
+        type: choice
+        options: [express, standard-multi-az]
+        default: express
       confirm_destroy:
         description: To destroy, type the word destroy here (safety check)
         type: string
         default: ""
-      db_engine:
-        description: Database edition (sqlserver-se is needed for Multi-AZ)
-        type: choice
-        options: [sqlserver-ex, sqlserver-se]
-        default: sqlserver-ex
-      db_instance_class:
-        description: Database server size
-        type: string
-        default: db.t3.micro
-      db_multi_az:
-        description: Standby database in a second zone
-        type: boolean
-        default: false
 
 permissions:
   id-token: write # lets the job ask GitHub for the token it swaps for AWS credentials
   contents: read
 
-# Never run two deployments of the same project at once.
+# Never run two deployments of the same project and layer at once.
 concurrency:
-  group: deploy-${{ inputs.project }}
+  group: deploy-${{ inputs.project }}-${{ inputs.layer }}
   cancel-in-progress: false
 
 jobs:
@@ -77,8 +82,10 @@ jobs:
           FIRST: ${{ inputs.first }}
           SECOND: ${{ inputs.second }}
           THIRD: ${{ inputs.third }}
+          ACTION: ${{ inputs.action }}
+          CONFIRM: ${{ inputs.confirm_destroy }}
         run: |
-          if [ "${{ inputs.action }}" = "destroy" ] && [ "${{ inputs.confirm_destroy }}" != "destroy" ]; then
+          if [ "$ACTION" = "destroy" ] && [ "$CONFIRM" != "destroy" ]; then
             echo "::error::Destroy was chosen but the confirmation box does not say 'destroy'. Nothing was changed."
             exit 1
           fi
@@ -97,13 +104,13 @@ jobs:
           echo "regions=[${json%,}]" >> "$GITHUB_OUTPUT"
           {
             echo "### Rollout order"
-            echo "Project: **${{ inputs.project }}**, action: **${{ inputs.action }}**"
+            echo "Project: **${{ inputs.project }}**, layer: **${{ inputs.layer }}**, action: **$ACTION**"
             n=1
             for region in "${list[@]}"; do echo "$n. $region"; n=$((n+1)); done
           } >> "$GITHUB_STEP_SUMMARY"
 
   terraform:
-    name: ${{ inputs.action }} ${{ inputs.project }} ${{ matrix.region }}
+    name: ${{ inputs.action }} ${{ inputs.project }} ${{ inputs.layer }} ${{ matrix.region }}
     needs: order
     runs-on: ubuntu-latest
     timeout-minutes: 110
@@ -118,12 +125,10 @@ jobs:
     env:
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
-      TF_VAR_db_engine: ${{ inputs.db_engine }}
-      TF_VAR_db_instance_class: ${{ inputs.db_instance_class }}
-      TF_VAR_db_multi_az: ${{ inputs.db_multi_az }}
+      TF_VAR_image_tag: ${{ inputs.image_tag }}
     defaults:
       run:
-        working-directory: projects/${{ inputs.project }}/${{ matrix.region }}
+        working-directory: projects/${{ inputs.project }}/${{ matrix.region }}/${{ inputs.layer }}
     steps:
       - uses: actions/checkout@v4
 
@@ -140,6 +145,20 @@ jobs:
           role-duration-seconds: 7200
           mask-aws-account-id: true # this repository is public: print *** instead of the account ID in logs
 
+      # express           = SQL Server Express, one zone. Cheap, for normal lab use.
+      # standard-multi-az = SQL Server Standard with a standby in a second zone. Costs several dollars an hour.
+      - name: Database settings
+        run: |
+          if [ "${{ inputs.database }}" = "standard-multi-az" ]; then
+            echo "TF_VAR_db_engine=sqlserver-se"        >> "$GITHUB_ENV"
+            echo "TF_VAR_db_instance_class=db.t3.xlarge" >> "$GITHUB_ENV"
+            echo "TF_VAR_db_multi_az=true"               >> "$GITHUB_ENV"
+          else
+            echo "TF_VAR_db_engine=sqlserver-ex"        >> "$GITHUB_ENV"
+            echo "TF_VAR_db_instance_class=db.t3.micro"  >> "$GITHUB_ENV"
+            echo "TF_VAR_db_multi_az=false"              >> "$GITHUB_ENV"
+          fi
+
       - name: Init
         run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
 
@@ -154,9 +173,11 @@ jobs:
 
       # The next region starts only if this one answers. Windows servers can take 15 minutes to boot.
       - name: Health check
-        if: inputs.action == 'apply' && inputs.project != 'eks'
+        if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project != 'eks'
+        env:
+          HEALTH_PATH: ${{ inputs.project == 'ecs' && inputs.image_tag != '' && '/health' || '/' }}
         run: |
-          url=$(terraform output -raw url)
+          url="$(terraform output -raw url)$HEALTH_PATH"
           echo "Checking $url"
           for attempt in $(seq 1 60); do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" || true)
@@ -171,9 +192,9 @@ jobs:
           exit 1
 
       # Kubernetes creates its own load balancer outside Terraform. Remove it first,
-      # otherwise the network cannot be deleted while the load balancer still uses it.
-      - name: Remove the Kubernetes app (EKS only)
-        if: inputs.action == 'destroy' && inputs.project == 'eks'
+      # otherwise the cluster's network cannot be cleaned up while the load balancer still uses it.
+      - name: Remove the Kubernetes app (EKS app layer only)
+        if: inputs.action == 'destroy' && inputs.project == 'eks' && inputs.layer == 'app'
         working-directory: .
         run: |
           regions='{"au":"ap-southeast-2","uk":"eu-west-2","us":"us-east-1"}'
@@ -184,7 +205,8 @@ jobs:
             echo "No cluster found, nothing to remove"
           fi
 
-      # Removes everything in this region: app tier, database (with its data) and network.
+      # foundation: removes the network, the registry and the database WITH ITS DATA.
+      # app:        removes the load balancer, firewall and app tier. The data stays.
       - name: Destroy
         if: inputs.action == 'destroy'
         run: terraform destroy -auto-approve

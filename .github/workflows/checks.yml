@@ -22,9 +22,9 @@ jobs:
       - name: Formatting
         run: terraform fmt -check -recursive
 
-      - name: Validate every project in every region
+      - name: Validate every project, region and layer
         run: |
-          for dir in projects/*/au projects/*/uk projects/*/us; do
+          for dir in projects/*/{au,uk,us}/{foundation,app}; do
             echo "::group::$dir"
             terraform -chdir="$dir" init -backend=false -input=false
             terraform -chdir="$dir" validate
