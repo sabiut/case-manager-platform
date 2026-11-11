@@ -34,11 +34,31 @@ variable "image" {
   default     = ""
 }
 
+# Database settings. Defaults are the cheap lab setup (Express, one zone).
+# For a Multi-AZ test:  terraform apply -var db_engine=sqlserver-se -var db_instance_class=<class> -var db_multi_az=true
+variable "db_engine" {
+  type    = string
+  default = "sqlserver-ex"
+}
+
+variable "db_instance_class" {
+  type    = string
+  default = "db.t3.micro"
+}
+
+variable "db_multi_az" {
+  type    = bool
+  default = false
+}
+
 module "stack" {
-  source      = "../stack"
-  region_code = "au"
-  cidr        = "10.10.0.0/16"
-  image       = var.image
+  source            = "../stack"
+  region_code       = "au"
+  cidr              = "10.10.0.0/16"
+  image             = var.image
+  db_engine         = var.db_engine
+  db_instance_class = var.db_instance_class
+  db_multi_az       = var.db_multi_az
 }
 
 output "url" { value = module.stack.url }

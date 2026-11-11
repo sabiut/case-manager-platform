@@ -12,12 +12,13 @@ module "network" {
 }
 
 module "database" {
-  source     = "../../../modules/database"
-  name       = local.name
-  vpc_id     = module.network.vpc_id
-  subnet_ids = module.network.database_subnet_ids
-  engine     = var.db_engine
-  multi_az   = var.db_multi_az
+  source         = "../../../modules/database"
+  name           = local.name
+  vpc_id         = module.network.vpc_id
+  subnet_ids     = module.network.database_subnet_ids
+  engine         = var.db_engine
+  instance_class = var.db_instance_class
+  multi_az       = var.db_multi_az
 }
 
 module "app" {
