@@ -26,9 +26,14 @@ resource "aws_iam_role" "github_actions" {
       Principal = { Federated = data.aws_iam_openid_connect_provider.github.arn }
       Action    = "sts:AssumeRoleWithWebIdentity"
       Condition = {
-        StringEquals = { "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com" }
-        # Only this repository. Production narrows it further, for example to the main branch only.
-        StringLike = { "token.actions.githubusercontent.com:sub" = "repo:${var.github_repo}:*" }
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+          # Only deploy jobs that run in the au, uk or us environment of this repository.
+          # Pull requests, forks and any other workflow get no AWS access at all.
+          "token.actions.githubusercontent.com:sub" = [
+            for env in ["au", "uk", "us"] : "repo:${var.github_repo}:environment:${env}"
+          ]
+        }
       }
     }]
   })
