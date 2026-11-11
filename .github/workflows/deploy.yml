@@ -1,5 +1,12 @@
-# Deploys one project to one region, or rolls it out to all three in order: AU, then UK, then US.
-# Started by hand from the Actions tab: choose the project, the region and the action.
+# Deploys one project to the regions you choose, in the order you choose, one region at a time.
+# Started by hand from the Actions tab.
+#
+#   First region  = deployed first.
+#   Second region = starts only after the first has finished and passed its health check.
+#   Third region  = starts only after the second has finished and passed its health check.
+#
+# Leave second and third on "none" to deploy a single region.
+# If any region fails, the regions after it are not touched.
 name: deploy
 
 on:
@@ -10,16 +17,26 @@ on:
         type: choice
         options: [ecs, ec2, eks]
         default: ecs
-      region:
-        description: Where
-        type: choice
-        options: [au, uk, us, all]
-        default: au
       action:
         description: What to do
         type: choice
         options: [plan, apply, destroy]
         default: plan
+      first:
+        description: First region
+        type: choice
+        options: [au, uk, us]
+        default: au
+      second:
+        description: Second region (starts after the first is healthy)
+        type: choice
+        options: [none, au, uk, us]
+        default: none
+      third:
+        description: Third region (starts after the second is healthy)
+        type: choice
+        options: [none, au, uk, us]
+        default: none
       db_engine:
         description: Database edition (sqlserver-se is needed for Multi-AZ)
         type: choice
@@ -38,22 +55,58 @@ permissions:
   id-token: write # lets the job ask GitHub for the token it swaps for AWS credentials
   contents: read
 
-# Never run two deployments of the same project and region at once.
+# Never run two deployments of the same project at once.
 concurrency:
-  group: deploy-${{ inputs.project }}-${{ inputs.region }}
+  group: deploy-${{ inputs.project }}
   cancel-in-progress: false
 
 jobs:
+  # Turns the three choices into an ordered list, for example ["uk","au"], and rejects duplicates.
+  order:
+    name: rollout order
+    runs-on: ubuntu-latest
+    outputs:
+      regions: ${{ steps.build.outputs.regions }}
+    steps:
+      - id: build
+        env:
+          FIRST: ${{ inputs.first }}
+          SECOND: ${{ inputs.second }}
+          THIRD: ${{ inputs.third }}
+        run: |
+          list=()
+          for region in "$FIRST" "$SECOND" "$THIRD"; do
+            [ "$region" = "none" ] && continue
+            for seen in "${list[@]}"; do
+              if [ "$seen" = "$region" ]; then
+                echo "::error::Region '$region' was chosen more than once"
+                exit 1
+              fi
+            done
+            list+=("$region")
+          done
+          json=$(printf '"%s",' "${list[@]}")
+          echo "regions=[${json%,}]" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Rollout order"
+            echo "Project: **${{ inputs.project }}**, action: **${{ inputs.action }}**"
+            n=1
+            for region in "${list[@]}"; do echo "$n. $region"; n=$((n+1)); done
+          } >> "$GITHUB_STEP_SUMMARY"
+
   terraform:
     name: ${{ inputs.action }} ${{ inputs.project }} ${{ matrix.region }}
+    needs: order
     runs-on: ubuntu-latest
     timeout-minutes: 110
+    # One GitHub environment per region (au, uk, us). Add "required reviewers" to an environment
+    # in the repository settings and that region waits for a person to approve before it starts.
+    environment: ${{ matrix.region }}
     strategy:
-      # One region at a time, in this order. If Australia fails, the UK and US are not touched.
-      max-parallel: 1
-      fail-fast: true
+      max-parallel: 1 # one region at a time, in the order of the list
+      fail-fast: true # a failed region cancels the ones after it
       matrix:
-        region: ${{ inputs.region == 'all' && fromJSON('["au","uk","us"]') || fromJSON(format('["{0}"]', inputs.region)) }}
+        region: ${{ fromJSON(needs.order.outputs.regions) }}
     env:
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
@@ -69,6 +122,7 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.17.1
+          terraform_wrapper: false # plain output, so "terraform output -raw" works in scripts
 
       - name: Sign in to AWS (no stored keys)
         uses: aws-actions/configure-aws-credentials@v4
@@ -88,6 +142,24 @@ jobs:
       - name: Apply
         if: inputs.action == 'apply'
         run: terraform apply tfplan
+
+      # The next region starts only if this one answers. Windows servers can take 15 minutes to boot.
+      - name: Health check
+        if: inputs.action == 'apply' && inputs.project != 'eks'
+        run: |
+          url=$(terraform output -raw url)
+          echo "Checking $url"
+          for attempt in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" || true)
+            if [ "$code" = "200" ]; then
+              echo "Healthy after $attempt attempt(s)"
+              exit 0
+            fi
+            echo "Attempt $attempt: HTTP $code, waiting 20 seconds"
+            sleep 20
+          done
+          echo "::error::${{ matrix.region }} did not become healthy. Later regions will not be deployed."
+          exit 1
 
       - name: Destroy
         if: inputs.action == 'destroy'
