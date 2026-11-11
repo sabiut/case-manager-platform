@@ -18,11 +18,3 @@ output "log_group" {
 output "task_definition_arn" {
   value = module.app.task_definition_arn
 }
-
-output "migrate_task_definition_arn" {
-  value = module.app.migrate_task_definition_arn
-}
-
-output "run_task_network" {
-  value = module.app.run_task_network
-}

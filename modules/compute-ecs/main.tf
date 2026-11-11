@@ -192,9 +192,20 @@ resource "aws_ecs_task_definition" "app" {
 }
 
 # One-off task that prepares the database: same image, different command, admin login.
-# The pipeline runs it once per deployment. It is not part of the running service.
+# The pipeline runs it once per deployment, BEFORE the service is updated. It is not part of the service.
 resource "aws_ecs_task_definition" "migrate" {
-  count                    = var.image != "" ? 1 : 0 # the placeholder web server has nothing to migrate
+  count = var.image != "" ? 1 : 0 # the placeholder web server has nothing to migrate
+
+  # Everything the task needs in order to run. The pipeline creates this resource first, on its own
+  # (terraform apply -target), and these dependencies make sure the pieces below exist by then:
+  # a cluster to run in, permission to read the secrets, and a way out to the registry and the logs.
+  depends_on = [
+    aws_ecs_cluster.this,
+    aws_iam_role_policy_attachment.execution,
+    aws_iam_role_policy.read_db_secret,
+    aws_vpc_security_group_egress_rule.app_out,
+  ]
+
   family                   = "${var.name}-migrate"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"

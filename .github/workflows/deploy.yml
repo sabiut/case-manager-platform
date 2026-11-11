@@ -169,6 +169,52 @@ jobs:
       - name: Init
         run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"
 
+      # ---- ECS with a real image: migrate the database BEFORE the new version is rolled out ----
+      # The new app version expects its login and schema to exist. If the service were updated first,
+      # healthy tasks would be replaced by tasks that cannot use the database, and a failed migration
+      # would leave that broken version running. So: create only what the migration task needs,
+      # run it, and stop here if it fails. The running service has not been touched at that point.
+      - name: Prepare the migration task (ECS)
+        if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project == 'ecs' && inputs.image_tag != ''
+        run: |
+          terraform apply -auto-approve \
+            -target='module.stack.module.app.aws_ecs_task_definition.migrate' \
+            -target='module.stack.aws_vpc_security_group_ingress_rule.db_from_app'
+
+      - name: Run the database migration (ECS)
+        if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project == 'ecs' && inputs.image_tag != ''
+        env:
+          NAME: cm-ecs-${{ matrix.region }}
+        run: |
+          # Looked up by name rather than from Terraform outputs, which are not complete after a targeted apply.
+          vpc=$(aws ec2 describe-vpcs --region "$DEPLOY_REGION" --filters "Name=tag:Name,Values=$NAME" --query 'Vpcs[0].VpcId' --output text)
+          subnets=$(aws ec2 describe-subnets --region "$DEPLOY_REGION" --filters "Name=vpc-id,Values=$vpc" "Name=tag:Tier,Values=app" --query 'Subnets[].SubnetId' --output json | jq -c .)
+          group=$(aws ec2 describe-security-groups --region "$DEPLOY_REGION" --filters "Name=vpc-id,Values=$vpc" "Name=group-name,Values=$NAME-app" --query 'SecurityGroups[0].GroupId' --output text)
+          network="{\"awsvpcConfiguration\":{\"subnets\":$subnets,\"securityGroups\":[\"$group\"],\"assignPublicIp\":\"DISABLED\"}}"
+
+          # On a first deployment the task's permissions were created seconds ago and may not have
+          # reached every AWS system yet, so a failed start is retried. The migration is safe to repeat.
+          for attempt in 1 2 3; do
+            task=$(aws ecs run-task --region "$DEPLOY_REGION" --cluster "$NAME" --launch-type FARGATE \
+              --task-definition "$NAME-migrate" --network-configuration "$network" \
+              --query 'tasks[0].taskArn' --output text)
+            echo "Attempt $attempt: migration task started, waiting for it to finish"
+            aws ecs wait tasks-stopped --region "$DEPLOY_REGION" --cluster "$NAME" --tasks "$task"
+            aws logs tail "/$NAME/app" --region "$DEPLOY_REGION" --log-stream-name-prefix migrate --since 10m --format short || true
+            code=$(aws ecs describe-tasks --region "$DEPLOY_REGION" --cluster "$NAME" --tasks "$task" \
+              --query 'tasks[0].containers[0].exitCode' --output text)
+            if [ "$code" = "0" ]; then
+              echo "Migration succeeded"
+              exit 0
+            fi
+            reason=$(aws ecs describe-tasks --region "$DEPLOY_REGION" --cluster "$NAME" --tasks "$task" \
+              --query 'tasks[0].stoppedReason' --output text)
+            echo "Attempt $attempt failed (exit code $code): $reason"
+            sleep 30
+          done
+          echo "::error::The database migration failed. The app service was NOT updated, and later regions will not be deployed."
+          exit 1
+
       - name: Plan
         if: inputs.action != 'destroy'
         run: terraform plan -out=tfplan
@@ -202,28 +248,6 @@ jobs:
             exit 1
           fi
           echo "The requested version is running on every task."
-
-      # Schema changes and the app's restricted login are applied by a one-off task, never by the web app.
-      # It runs after the new version is up, so every schema change must also work with the previous
-      # version of the app (add first, remove in a later release).
-      - name: Run the database migration (ECS)
-        if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project == 'ecs' && inputs.image_tag != ''
-        run: |
-          cluster=$(terraform output -raw cluster_name)
-          task=$(aws ecs run-task --region "$DEPLOY_REGION" --cluster "$cluster" --launch-type FARGATE \
-            --task-definition "$(terraform output -raw migrate_task_definition_arn)" \
-            --network-configuration "$(terraform output -raw run_task_network)" \
-            --query 'tasks[0].taskArn' --output text)
-          echo "Migration task started, waiting for it to finish"
-          aws ecs wait tasks-stopped --region "$DEPLOY_REGION" --cluster "$cluster" --tasks "$task"
-          aws logs tail "$(terraform output -raw log_group)" --region "$DEPLOY_REGION" \
-            --log-stream-name-prefix migrate --since 15m --format short || true
-          code=$(aws ecs describe-tasks --region "$DEPLOY_REGION" --cluster "$cluster" --tasks "$task" \
-            --query 'tasks[0].containers[0].exitCode' --output text)
-          if [ "$code" != "0" ]; then
-            echo "::error::The database migration failed (exit code $code). Later regions will not be deployed."
-            exit 1
-          fi
 
       # /ready makes the app query its database, and reports which version answered.
       - name: Smoke test, including the database (ECS)
