@@ -5,3 +5,7 @@
 crash.log
 backend.hcl
 *.log
+
+# .NET build output
+bin/
+obj/

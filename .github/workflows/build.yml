@@ -1,6 +1,7 @@
-# Builds the two app images (frontend and backend API) once, scans them, and pushes those same
-# images to each region's registries. Both get the same tag, so one tag means one release.
-#   On a push that changes frontend/ or backend/:  build and scan only (no AWS access needed).
+# Tests the .NET code, builds the two app images (frontend and backend API) once, scans them, and
+# pushes those same images to each region's registries. Both get the same tag, so one tag means one release.
+# The usual .NET pipeline steps are all here: restore, build, test, publish (the last inside the Dockerfiles).
+#   On a push that changes frontend/ or backend/:  test, build and scan only (no AWS access needed).
 #   Started by hand:                               also push to the registries, ready for the deploy workflow.
 name: build
 
@@ -22,8 +23,24 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      # Restores the packages, compiles the API and its tests, and runs the tests.
+      # A package with a known vulnerability fails the restore, so it never reaches an image.
+      - name: Test the backend API
+        run: dotnet test backend/tests/Api.Tests/Api.Tests.csproj --nologo
+
   image:
     name: build and scan
+    needs: test
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
@@ -43,7 +60,7 @@ jobs:
           docker build -t "api:$TAG" --build-arg APP_VERSION="$TAG" backend
 
       # Report only for now. Change --exit-code to 1 to stop the pipeline on a fixable serious finding.
-      - name: Vulnerability scan (operating system packages and Python libraries)
+      - name: Vulnerability scan (operating system packages and .NET libraries)
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |

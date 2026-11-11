@@ -362,7 +362,7 @@ resource "aws_ecs_task_definition" "migrate" {
     name      = "migrate"
     image     = local.api_image
     essential = true
-    command   = ["python", "migrate.py"]
+    command   = ["migrate"] # added to the image's own start command: "dotnet Api.dll migrate"
 
     environment = [
       { name = "DB_HOST", value = var.db_host },
