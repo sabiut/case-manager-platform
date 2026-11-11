@@ -24,7 +24,7 @@ resource "aws_iam_role_policy_attachment" "cluster" {
 resource "aws_eks_cluster" "this" {
   name     = var.name
   role_arn = aws_iam_role.cluster.arn
-  # No version set: EKS uses its current default. Production pins a version and upgrades on purpose.
+  version  = var.kubernetes_version
 
   vpc_config {
     subnet_ids              = concat(var.app_subnet_ids, var.public_subnet_ids)

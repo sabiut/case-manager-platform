@@ -1,0 +1,22 @@
+# Critical findings this LAB accepts on purpose. Each needs fixing before real customer data is used.
+# A new critical finding that is not listed here fails the build.
+
+# Load balancer listens on HTTP, not HTTPS.
+# Why accepted: the lab has no domain name, so there is no certificate to attach.
+# Fix for real use: HTTPS listener with an ACM certificate, and redirect HTTP to HTTPS.
+AWS-0054
+AVD-AWS-0054
+
+# App tier security group allows outbound traffic to any address.
+# Why accepted: containers must reach the image registry, CloudWatch and Secrets Manager through the NAT gateway.
+# Fix for real use: VPC endpoints for those services, and outbound rules limited to them and the database.
+AWS-0104
+AVD-AWS-0104
+
+# EKS cluster endpoint is reachable from the internet.
+# Why accepted: lets kubectl on a laptop and on GitHub's runners reach the lab cluster.
+# Fix for real use: private endpoint only, reached through a VPN or a runner inside the network.
+AWS-0040
+AVD-AWS-0040
+AWS-0041
+AVD-AWS-0041

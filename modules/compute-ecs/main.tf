@@ -124,7 +124,7 @@ resource "aws_iam_role_policy" "read_db_secret" {
     Statement = [{
       Effect   = "Allow"
       Action   = "secretsmanager:GetSecretValue"
-      Resource = var.db_secret_arn
+      Resource = [var.app_db_secret_arn, var.admin_db_secret_arn]
     }]
   })
 }
@@ -174,10 +174,10 @@ resource "aws_ecs_task_definition" "app" {
       { name = "AWS_REGION_NAME", value = data.aws_region.current.region }
     ]
 
-    # The password never appears in Terraform or the task definition, only a pointer to the secret.
+    # The restricted login. The password is never in the task definition, only a pointer to the secret.
     secrets = [
-      { name = "DB_USER", valueFrom = "${var.db_secret_arn}:username::" },
-      { name = "DB_PASSWORD", valueFrom = "${var.db_secret_arn}:password::" }
+      { name = "DB_USER", valueFrom = "${var.app_db_secret_arn}:username::" },
+      { name = "DB_PASSWORD", valueFrom = "${var.app_db_secret_arn}:password::" }
     ]
 
     logConfiguration = {
@@ -186,6 +186,47 @@ resource "aws_ecs_task_definition" "app" {
         "awslogs-group"         = aws_cloudwatch_log_group.app.name
         "awslogs-region"        = data.aws_region.current.region
         "awslogs-stream-prefix" = "app"
+      }
+    }
+  }])
+}
+
+# One-off task that prepares the database: same image, different command, admin login.
+# The pipeline runs it once per deployment. It is not part of the running service.
+resource "aws_ecs_task_definition" "migrate" {
+  count                    = var.image != "" ? 1 : 0 # the placeholder web server has nothing to migrate
+  family                   = "${var.name}-migrate"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.execution.arn
+  task_role_arn            = aws_iam_role.task.arn
+
+  container_definitions = jsonencode([{
+    name      = "migrate"
+    image     = local.image
+    essential = true
+    command   = ["python", "migrate.py"]
+
+    environment = [
+      { name = "DB_HOST", value = var.db_host },
+      { name = "DB_NAME", value = var.db_name }
+    ]
+
+    secrets = [
+      { name = "DB_ADMIN_USER", valueFrom = "${var.admin_db_secret_arn}:username::" },
+      { name = "DB_ADMIN_PASSWORD", valueFrom = "${var.admin_db_secret_arn}:password::" },
+      { name = "APP_DB_USER", valueFrom = "${var.app_db_secret_arn}:username::" },
+      { name = "APP_DB_PASSWORD", valueFrom = "${var.app_db_secret_arn}:password::" }
+    ]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.app.name
+        "awslogs-region"        = data.aws_region.current.region
+        "awslogs-stream-prefix" = "migrate"
       }
     }
   }])
@@ -219,6 +260,10 @@ resource "aws_ecs_service" "app" {
     enable   = true
     rollback = true
   }
+
+  # "terraform apply" does not return until the deployment has finished (or failed),
+  # instead of returning as soon as ECS has accepted the request.
+  wait_for_steady_state = true
 
   depends_on = [aws_lb_listener.http]
 }

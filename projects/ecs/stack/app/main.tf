@@ -36,6 +36,10 @@ data "aws_security_group" "db" {
   vpc_id = data.aws_vpc.this.id
 }
 
+data "aws_secretsmanager_secret" "app_db" {
+  name = "${local.name}/app-db-login"
+}
+
 data "aws_ecr_repository" "app" {
   name = local.name
 }
@@ -57,8 +61,9 @@ module "app" {
   container_port    = local.real_app ? 8080 : 80
   health_check_path = local.real_app ? "/health" : "/"
 
-  db_host       = data.aws_db_instance.this.address
-  db_secret_arn = data.aws_db_instance.this.master_user_secret[0].secret_arn
+  db_host             = data.aws_db_instance.this.address
+  app_db_secret_arn   = data.aws_secretsmanager_secret.app_db.arn
+  admin_db_secret_arn = data.aws_db_instance.this.master_user_secret[0].secret_arn
 }
 
 # The only way into the database: SQL Server port, from the app tier's security group.

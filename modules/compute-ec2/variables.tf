@@ -38,6 +38,6 @@ variable "db_host" {
 }
 
 variable "db_secret_arn" {
-  description = "Secrets Manager secret with the database username and password"
+  description = "Secret with the web app's restricted database login (never the admin login)"
   type        = string
 }

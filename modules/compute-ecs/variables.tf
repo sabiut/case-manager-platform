@@ -43,8 +43,13 @@ variable "db_host" {
   type = string
 }
 
-variable "db_secret_arn" {
-  description = "Secrets Manager secret with the database username and password"
+variable "app_db_secret_arn" {
+  description = "Secret with the web app's restricted database login"
+  type        = string
+}
+
+variable "admin_db_secret_arn" {
+  description = "Secret with the database admin login. Given only to the migration task, never to the web app."
   type        = string
 }
 

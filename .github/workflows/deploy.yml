@@ -55,6 +55,10 @@ on:
         type: choice
         options: [express, standard-multi-az]
         default: express
+      protect_data:
+        description: "Foundation layer only: real-data protection (deletion protection, final snapshot)"
+        type: boolean
+        default: false
       confirm_destroy:
         description: To destroy, type the word destroy here (safety check)
         type: string
@@ -126,6 +130,9 @@ jobs:
       TF_IN_AUTOMATION: "true"
       TF_INPUT: "false"
       TF_VAR_image_tag: ${{ inputs.image_tag }}
+      TF_VAR_protect_data: ${{ inputs.protect_data }}
+      # The AWS region this job deploys to, for the AWS CLI steps below.
+      DEPLOY_REGION: ${{ fromJSON('{"au":"ap-southeast-2","uk":"eu-west-2","us":"us-east-1"}')[matrix.region] }}
     defaults:
       run:
         working-directory: projects/${{ inputs.project }}/${{ matrix.region }}/${{ inputs.layer }}
@@ -171,13 +178,86 @@ jobs:
         if: inputs.action == 'apply'
         run: terraform apply tfplan
 
-      # The next region starts only if this one answers. Windows servers can take 15 minutes to boot.
-      - name: Health check
-        if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project != 'eks'
-        env:
-          HEALTH_PATH: ${{ inputs.project == 'ecs' && inputs.image_tag != '' && '/health' || '/' }}
+      # ---- ECS with a real image: prove the NEW version is running before moving on ----
+      # A plain "is the site up?" check is not enough: during a rolling deployment an old container
+      # can answer while the new version is failing and being rolled back.
+
+      - name: Check the deployment finished on the requested version (ECS)
+        if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project == 'ecs' && inputs.image_tag != ''
         run: |
-          url="$(terraform output -raw url)$HEALTH_PATH"
+          cluster=$(terraform output -raw cluster_name)
+          service=$(terraform output -raw service_name)
+          wanted=$(terraform output -raw task_definition_arn)
+          aws ecs wait services-stable --region "$DEPLOY_REGION" --cluster "$cluster" --services "$service"
+          read -r state running_def running desired < <(aws ecs describe-services --region "$DEPLOY_REGION" \
+            --cluster "$cluster" --services "$service" --output text \
+            --query "services[0].deployments[?status=='PRIMARY'] | [0].[rolloutState,taskDefinition,runningCount,desiredCount]")
+          echo "Rollout state: $state, running $running of $desired"
+          if [ "$running_def" != "$wanted" ]; then
+            echo "::error::The service is NOT running the requested version. ECS rolled back to the previous one."
+            exit 1
+          fi
+          if [ "$state" != "COMPLETED" ] || [ "$running" != "$desired" ]; then
+            echo "::error::The deployment did not complete (state $state, $running of $desired running)."
+            exit 1
+          fi
+          echo "The requested version is running on every task."
+
+      # Schema changes and the app's restricted login are applied by a one-off task, never by the web app.
+      # It runs after the new version is up, so every schema change must also work with the previous
+      # version of the app (add first, remove in a later release).
+      - name: Run the database migration (ECS)
+        if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project == 'ecs' && inputs.image_tag != ''
+        run: |
+          cluster=$(terraform output -raw cluster_name)
+          task=$(aws ecs run-task --region "$DEPLOY_REGION" --cluster "$cluster" --launch-type FARGATE \
+            --task-definition "$(terraform output -raw migrate_task_definition_arn)" \
+            --network-configuration "$(terraform output -raw run_task_network)" \
+            --query 'tasks[0].taskArn' --output text)
+          echo "Migration task started, waiting for it to finish"
+          aws ecs wait tasks-stopped --region "$DEPLOY_REGION" --cluster "$cluster" --tasks "$task"
+          aws logs tail "$(terraform output -raw log_group)" --region "$DEPLOY_REGION" \
+            --log-stream-name-prefix migrate --since 15m --format short || true
+          code=$(aws ecs describe-tasks --region "$DEPLOY_REGION" --cluster "$cluster" --tasks "$task" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          if [ "$code" != "0" ]; then
+            echo "::error::The database migration failed (exit code $code). Later regions will not be deployed."
+            exit 1
+          fi
+
+      # /ready makes the app query its database, and reports which version answered.
+      - name: Smoke test, including the database (ECS)
+        if: inputs.action == 'apply' && inputs.layer == 'app' && inputs.project == 'ecs' && inputs.image_tag != ''
+        env:
+          WANTED: ${{ inputs.image_tag }}
+        run: |
+          url="$(terraform output -raw url)/ready"
+          echo "Checking $url"
+          passes=0
+          for attempt in $(seq 1 30); do
+            body=$(curl -s --max-time 10 "$url" || true)
+            status=$(echo "$body" | jq -r '.status // empty' 2>/dev/null || true)
+            version=$(echo "$body" | jq -r '.version // empty' 2>/dev/null || true)
+            if [ "$status" = "ok" ] && [ "$version" = "$WANTED" ]; then
+              passes=$((passes+1))
+              # Five in a row, so both tasks behind the load balancer have very likely answered.
+              if [ "$passes" -ge 5 ]; then echo "Healthy on version $version with a working database"; exit 0; fi
+              sleep 2
+              continue
+            fi
+            passes=0
+            echo "Attempt $attempt: status='$status' version='$version', waiting 10 seconds"
+            sleep 10
+          done
+          echo "::error::${{ matrix.region }} did not pass the smoke test. Later regions will not be deployed."
+          exit 1
+
+      # ---- EC2, and ECS with the placeholder page: wait for the site to answer ----
+      # Windows servers can take 15 minutes to boot.
+      - name: Health check
+        if: inputs.action == 'apply' && inputs.layer == 'app' && (inputs.project == 'ec2' || (inputs.project == 'ecs' && inputs.image_tag == ''))
+        run: |
+          url="$(terraform output -raw url)/"
           echo "Checking $url"
           for attempt in $(seq 1 60); do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" || true)
@@ -191,19 +271,31 @@ jobs:
           echo "::error::${{ matrix.region }} did not become healthy. Later regions will not be deployed."
           exit 1
 
-      # Kubernetes creates its own load balancer outside Terraform. Remove it first,
-      # otherwise the cluster's network cannot be cleaned up while the load balancer still uses it.
+      # Kubernetes creates its own load balancer outside Terraform. It must be gone before the cluster
+      # is destroyed, otherwise it is left behind and blocks the network from being deleted.
+      # Only "the cluster does not exist" is treated as nothing to do. Any other error stops the destroy.
       - name: Remove the Kubernetes app (EKS app layer only)
         if: inputs.action == 'destroy' && inputs.project == 'eks' && inputs.layer == 'app'
         working-directory: .
         run: |
-          regions='{"au":"ap-southeast-2","uk":"eu-west-2","us":"us-east-1"}'
-          aws_region=$(echo "$regions" | jq -r '."${{ matrix.region }}"')
-          if aws eks update-kubeconfig --name "cm-eks-${{ matrix.region }}" --region "$aws_region"; then
-            kubectl delete -f k8s/app.yaml --ignore-not-found --timeout=5m || true
-          else
-            echo "No cluster found, nothing to remove"
+          cluster="cm-eks-${{ matrix.region }}"
+          if ! result=$(aws eks describe-cluster --region "$DEPLOY_REGION" --name "$cluster" --query cluster.status --output text 2>&1); then
+            if echo "$result" | grep -q ResourceNotFoundException; then
+              echo "Cluster $cluster does not exist, nothing to remove"
+              exit 0
+            fi
+            echo "::error::Could not check the cluster: $result"
+            exit 1
           fi
+          aws eks update-kubeconfig --region "$DEPLOY_REGION" --name "$cluster"
+          kubectl delete -f k8s/app.yaml --ignore-not-found --wait --timeout=10m
+          left=$(kubectl get services --all-namespaces -o json | jq '[.items[] | select(.spec.type == "LoadBalancer")] | length')
+          if [ "$left" != "0" ]; then
+            echo "::error::$left Kubernetes load balancer service(s) still exist. Remove them before destroying the cluster."
+            kubectl get services --all-namespaces
+            exit 1
+          fi
+          echo "No Kubernetes load balancers remain"
 
       # foundation: removes the network, the registry and the database WITH ITS DATA.
       # app:        removes the load balancer, firewall and app tier. The data stays.

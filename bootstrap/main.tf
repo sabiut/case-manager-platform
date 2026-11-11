@@ -23,9 +23,17 @@ locals {
   bucket = "cm-platform-tfstate-${data.aws_caller_identity.current.account_id}"
 }
 
+# false (lab): "terraform destroy" here removes the bucket and every state file in it.
+# true: the bucket cannot be destroyed while it holds state. Use this as soon as the state describes
+# anything you could not afford to lose track of.
+variable "protect_state" {
+  type    = bool
+  default = false
+}
+
 resource "aws_s3_bucket" "state" {
   bucket        = local.bucket
-  force_destroy = true # lab only: lets "terraform destroy" remove the bucket with its contents
+  force_destroy = !var.protect_state
 }
 
 resource "aws_s3_bucket_versioning" "state" {

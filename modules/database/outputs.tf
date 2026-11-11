@@ -23,3 +23,8 @@ output "master_secret_arn" {
 output "migration_bucket" {
   value = aws_s3_bucket.migration.bucket
 }
+
+output "app_secret_arn" {
+  description = "Secrets Manager secret holding the web app's restricted username and password"
+  value       = aws_secretsmanager_secret.app.arn
+}

@@ -24,3 +24,9 @@ variable "db_multi_az" {
   type        = bool
   default     = false
 }
+
+variable "protect_data" {
+  description = "true for real data: deletion protection, final snapshot, buckets not force-emptied"
+  type        = bool
+  default     = false
+}

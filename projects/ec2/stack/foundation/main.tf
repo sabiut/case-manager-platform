@@ -20,4 +20,5 @@ module "database" {
   engine         = var.db_engine
   instance_class = var.db_instance_class
   multi_az       = var.db_multi_az
+  protect_data   = var.protect_data
 }

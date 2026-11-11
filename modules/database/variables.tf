@@ -41,8 +41,18 @@ variable "backup_retention_days" {
   default     = 7
 }
 
-variable "lab_mode" {
-  description = "true: can be destroyed without a final snapshot. false: protected from deletion."
+variable "major_version" {
+  description = "SQL Server major version. 16.00 is SQL Server 2022. Pinned so every region and every deploy gets the same one."
+  type        = string
+  default     = "16.00"
+}
+
+variable "protect_data" {
+  description = <<-EOT
+    false (lab): the database can be destroyed, no final snapshot is taken, buckets are emptied on destroy.
+    true (real data): deletion protection on, a final snapshot is required, buckets cannot be force-emptied.
+    This is separate from multi_az on purpose: high availability does not imply protection from deletion.
+  EOT
   type        = bool
-  default     = true
+  default     = false
 }

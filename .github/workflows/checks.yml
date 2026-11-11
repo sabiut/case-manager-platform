@@ -42,7 +42,11 @@ jobs:
       - name: Secrets scan (passwords or keys committed to git)
         run: docker run --rm -v "$PWD:/src" zricethezav/gitleaks:latest detect --source /src --redact
 
-      # Report only for now (exit code 0). Once the findings are reviewed, change to --exit-code 1
-      # so a risky change fails the build.
-      - name: Terraform scan (open security groups, unencrypted storage)
-        run: docker run --rm -v "$PWD:/src" aquasec/trivy:latest config --severity HIGH,CRITICAL --exit-code 0 /src
+      # Critical findings fail the build, unless they are in .trivyignore, the reviewed list of
+      # findings this lab accepts on purpose, each with its reason.
+      - name: Terraform scan, critical findings fail the build
+        run: docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:latest config --severity CRITICAL --exit-code 1 .
+
+      # High findings are reported but do not fail the build yet.
+      - name: Terraform scan, high findings (report only)
+        run: docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:latest config --severity HIGH --exit-code 0 .

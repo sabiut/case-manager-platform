@@ -76,7 +76,7 @@ jobs:
       - name: Sign in to AWS (no stored keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_PUBLISH_ROLE_ARN }} # may only push images, nothing else
           aws-region: ap-southeast-2
           mask-aws-account-id: true
 

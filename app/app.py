@@ -1,16 +1,18 @@
 """Small three-tier demo app: a web page that lists cases from a customer's SQL Server database.
 
 Settings come from environment variables, set by the platform:
-  DB_HOST, DB_USER, DB_PASSWORD   where the database is and how to sign in
-  DB_NAME                         the customer database to read (default: demo)
-  REGION_CODE                     au, uk or us, shown on the page
+  DB_HOST                 where the database is
+  DB_USER, DB_PASSWORD    the app's own restricted login (read and write rows in its database, nothing else)
+  DB_NAME                 the customer database to read (default: demo)
+  REGION_CODE             au, uk or us, shown on the page
+
+The app never creates or changes the schema. That is migrate.py, run as a separate step.
 """
 import os
-import re
 import socket
 
 import pymssql
-from flask import Flask, render_template_string
+from flask import Flask, jsonify, render_template_string
 
 DB_HOST = os.environ.get("DB_HOST", "")
 DB_USER = os.environ.get("DB_USER", "")
@@ -18,10 +20,6 @@ DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
 DB_NAME = os.environ.get("DB_NAME", "demo")
 REGION_CODE = os.environ.get("REGION_CODE", "local")
 VERSION = os.environ.get("APP_VERSION", "dev")
-
-# The name is placed into SQL text below, so allow only letters, digits, - and _.
-if not re.fullmatch(r"[A-Za-z0-9_-]{1,60}", DB_NAME):
-    raise SystemExit(f"DB_NAME '{DB_NAME}' is not a valid database name")
 
 app = Flask(__name__)
 
@@ -39,7 +37,7 @@ PAGE = """<!doctype html>
   <dt>Answered by</dt><dd>{{ host }}</dd>
   <dt>App version</dt><dd>{{ version }}</dd>
   <dt>Database</dt>
-  <dd>{% if error %}<span class="bad">Not reachable: {{ error }}</span>
+  <dd>{% if failed %}<span class="bad">The database is not available right now.</span>
       {% else %}<span class="ok">Connected</span> to {{ db_name }} on {{ db_version }}{% endif %}</dd>
 </dl>
 {% if cases %}
@@ -52,61 +50,48 @@ PAGE = """<!doctype html>
 """
 
 
-def connect(database):
+def connect():
     return pymssql.connect(
-        server=DB_HOST, user=DB_USER, password=DB_PASSWORD, database=database,
-        login_timeout=5, timeout=10, autocommit=True,
+        server=DB_HOST, user=DB_USER, password=DB_PASSWORD, database=DB_NAME,
+        login_timeout=5, timeout=10,
     )
-
-
-def ensure_schema():
-    """Create the customer database, its table and a few sample rows if they are missing.
-
-    Lab shortcut: a real product runs schema changes as a separate, reviewed pipeline step,
-    and the app signs in with a login limited to its own database, not the admin login.
-    """
-    conn = connect("master")
-    try:
-        conn.cursor().execute(f"IF DB_ID('{DB_NAME}') IS NULL CREATE DATABASE [{DB_NAME}]")
-    finally:
-        conn.close()
-
-    conn = connect(DB_NAME)
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            IF OBJECT_ID('dbo.cases') IS NULL
-            CREATE TABLE dbo.cases (
-                id INT IDENTITY PRIMARY KEY,
-                client NVARCHAR(100) NOT NULL,
-                status NVARCHAR(20) NOT NULL,
-                opened DATE NOT NULL
-            )""")
-        cur.execute("SELECT COUNT(*) FROM dbo.cases")
-        if cur.fetchone()[0] == 0:
-            cur.executemany(
-                "INSERT INTO dbo.cases (client, status, opened) VALUES (%s, %s, %s)",
-                [("A. Smith", "Open", "2026-10-01"),
-                 ("B. Jones", "Closed", "2026-09-12"),
-                 ("C. Taylor", "Open", "2026-11-03")],
-            )
-    finally:
-        conn.close()
 
 
 @app.get("/health")
 def health():
-    # Used by the load balancer. It does not touch the database on purpose:
-    # if the database has a problem, the load balancer should not also kill every app copy.
-    return "ok"
+    """Liveness: is this copy of the app running? Used by the load balancer.
+
+    It does not touch the database on purpose: if the database has a problem,
+    the load balancer should not also remove every copy of the app.
+    """
+    return jsonify(status="ok", version=VERSION)
+
+
+@app.get("/ready")
+def ready():
+    """Readiness: can this copy reach its database and read the cases table?
+
+    Used by the deployment pipeline as the smoke test before it moves on to the next region.
+    """
+    try:
+        conn = connect()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM dbo.cases")
+            cur.fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        app.logger.exception("Readiness check failed")
+        return jsonify(status="database unavailable", version=VERSION), 503
+    return jsonify(status="ok", version=VERSION)
 
 
 @app.get("/")
 def index():
-    cases, db_version, error = [], "", ""
+    cases, db_version, failed = [], "", False
     try:
-        ensure_schema()
-        conn = connect(DB_NAME)
+        conn = connect()
         try:
             cur = conn.cursor()
             cur.execute("SELECT CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(50)), CAST(SERVERPROPERTY('Edition') AS NVARCHAR(100))")
@@ -116,9 +101,11 @@ def index():
             cases = cur.fetchall()
         finally:
             conn.close()
-    except Exception as exc:  # show the problem on the page instead of a blank error
-        error = str(exc)[:300]
+    except Exception:
+        # The detail goes to the server log (CloudWatch). The visitor sees only a general message.
+        app.logger.exception("Could not read cases from the database")
+        failed = True
     return render_template_string(
         PAGE, region=REGION_CODE, host=socket.gethostname(), version=VERSION,
-        db_name=DB_NAME, db_version=db_version, cases=cases, error=error,
+        db_name=DB_NAME, db_version=db_version, cases=cases, failed=failed,
     )

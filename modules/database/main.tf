@@ -3,10 +3,12 @@
 
 data "aws_caller_identity" "current" {}
 
-# Ask AWS for the newest version of this engine instead of hardcoding one per region.
+# The major version is pinned (var.major_version). Within it, take the newest patch release,
+# so regions do not end up on different SQL Server generations depending on the day they were built.
 data "aws_rds_engine_version" "this" {
-  engine = var.engine
-  latest = true
+  engine  = var.engine
+  version = var.major_version
+  latest  = true
 }
 
 locals {
@@ -31,7 +33,7 @@ resource "aws_security_group" "db" {
 
 resource "aws_s3_bucket" "migration" {
   bucket        = "${var.name}-migration-${data.aws_caller_identity.current.account_id}"
-  force_destroy = var.lab_mode
+  force_destroy = !var.protect_data
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "migration" {
@@ -134,8 +136,36 @@ resource "aws_db_instance" "this" {
   backup_retention_period = var.backup_retention_days
   copy_tags_to_snapshot   = true
 
-  deletion_protection       = !var.lab_mode
-  skip_final_snapshot       = var.lab_mode
-  final_snapshot_identifier = var.lab_mode ? null : "${var.name}-final"
-  apply_immediately         = var.lab_mode
+  auto_minor_version_upgrade = true # patch releases only, inside the pinned major version
+
+  deletion_protection       = var.protect_data
+  skip_final_snapshot       = !var.protect_data
+  final_snapshot_identifier = var.protect_data ? "${var.name}-final" : null
+  apply_immediately         = !var.protect_data # real data: changes wait for the maintenance window
+}
+
+# ---- The web app's own database login ----
+# The app must not use the admin login above. Terraform generates a password for a restricted
+# login and stores it here. The migration task creates the login in SQL Server with this password.
+
+resource "random_password" "app" {
+  length      = 32
+  special     = false # letters and digits only: the value is placed into a CREATE LOGIN statement
+  min_upper   = 2
+  min_lower   = 2
+  min_numeric = 2
+}
+
+resource "aws_secretsmanager_secret" "app" {
+  name                    = "${var.name}/app-db-login"
+  description             = "Restricted SQL Server login used by the web app"
+  recovery_window_in_days = var.protect_data ? 30 : 0 # lab: delete at once so the name can be reused
+}
+
+resource "aws_secretsmanager_secret_version" "app" {
+  secret_id = aws_secretsmanager_secret.app.id
+  secret_string = jsonencode({
+    username = "cm_app"
+    password = random_password.app.result
+  })
 }

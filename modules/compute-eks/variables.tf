@@ -22,3 +22,9 @@ variable "node_count" {
   type    = number
   default = 2
 }
+
+variable "kubernetes_version" {
+  description = "Pinned so every region runs the same version. Upgrade on purpose, one region at a time."
+  type        = string
+  default     = "1.37"
+}

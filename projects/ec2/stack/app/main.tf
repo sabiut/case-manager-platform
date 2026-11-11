@@ -36,6 +36,10 @@ data "aws_security_group" "db" {
   vpc_id = data.aws_vpc.this.id
 }
 
+data "aws_secretsmanager_secret" "app_db" {
+  name = "${local.name}/app-db-login"
+}
+
 module "app" {
   source            = "../../../../modules/compute-ec2"
   name              = local.name
@@ -43,7 +47,7 @@ module "app" {
   public_subnet_ids = data.aws_subnets.public.ids
   app_subnet_ids    = data.aws_subnets.app.ids
   db_host           = data.aws_db_instance.this.address
-  db_secret_arn     = data.aws_db_instance.this.master_user_secret[0].secret_arn
+  db_secret_arn     = data.aws_secretsmanager_secret.app_db.arn
 }
 
 # The only way into the database: SQL Server port, from the app tier's security group.
