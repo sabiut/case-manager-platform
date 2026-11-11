@@ -197,61 +197,98 @@ jobs:
             exit 1
           fi
 
-          # Three different failures are handled differently:
-          #   1. The task could not START (API error, or a "failures" entry, or the container never ran).
-          #      On a first deployment the task's permissions are seconds old and may not have reached
-          #      every AWS system yet, so this is retried.
-          #   2. The task is STILL RUNNING when the wait runs out. Nothing new is started, because that
-          #      would put two migrations on the same database. The step fails and names the task.
-          #   3. The migration RAN and failed. That is a real error in the migration, so it is not retried.
-          describe() {
-            aws ecs describe-tasks --region "$DEPLOY_REGION" --cluster "$NAME" --tasks "$task" --query "$1" --output text 2>/dev/null || echo "unknown"
+          # The rule throughout: only start another task when it is CERTAIN the previous one did not run.
+          #   1. The start request fails. It is not known whether AWS started a task, so the request is
+          #      repeated with the SAME client token. AWS then returns the task it already started
+          #      instead of starting a second one.
+          #   2. AWS confirms the task failed to start (stop code TaskFailedToStart, container never ran).
+          #      On a first deployment the task's permissions are seconds old, so this is retried
+          #      with a new token.
+          #   3. The task is still running when the wait runs out, or its result cannot be read.
+          #      Nothing new is started. The step fails and names the task.
+          #   4. The migration ran and failed. That is a real error in the migration, so it is not retried.
+
+          # Reads the task, retrying the SAME task if the read fails. Prints nothing if it cannot be read.
+          inspect() {
+            local try out
+            for try in 1 2 3 4 5; do
+              if out=$(aws ecs describe-tasks --region "$DEPLOY_REGION" --cluster "$NAME" --tasks "$task" --output json 2>/dev/null) \
+                && [ "$(jq -r '.tasks | length' <<<"$out")" = "1" ]; then
+                jq -c '.tasks[0]' <<<"$out"
+                return 0
+              fi
+              sleep 10
+            done
+            return 1
+          }
+          unknown() {
+            echo "::error::$1 No second migration was started, because this one may have run. Check this task, then run the deployment again: $task"
+            exit 1
           }
 
+          launch=1
+          uncertain=no
           for attempt in 1 2 3; do
             if [ "$attempt" -gt 1 ]; then sleep 30; fi
+            token="mig-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$DEPLOY_REGION-$launch"
 
             if ! response=$(aws ecs run-task --region "$DEPLOY_REGION" --cluster "$NAME" --launch-type FARGATE \
-              --task-definition "$NAME-migrate" --network-configuration "$network" --output json 2>run-task.err); then
-              echo "Attempt $attempt: the request to start the task failed: $(cat run-task.err)"
+              --task-definition "$NAME-migrate" --network-configuration "$network" \
+              --client-token "$token" --output json 2>run-task.err); then
+              echo "Attempt $attempt: the request to start the task failed, repeating it with the same token: $(cat run-task.err)"
+              uncertain=yes
               continue
             fi
 
             # A successful response can still contain no task, with the reason in "failures".
+            # That is a definite "nothing was started", so the next request gets a new token.
             task=$(jq -r '.tasks[0].taskArn // empty' <<<"$response")
             if [[ "$task" != arn:aws*:ecs:* ]]; then
               echo "Attempt $attempt: ECS did not start a task:"
               jq -r '.failures[]? | "  \(.reason // "no reason given") \(.detail // "")"' <<<"$response"
+              launch=$((launch + 1))
+              uncertain=no
               continue
             fi
             echo "Attempt $attempt: started $task, waiting for it to finish"
 
             # One wait lasts up to 10 minutes. Wait up to three times (30 minutes) for the SAME task.
-            status="unknown"
+            status=""
             for round in 1 2 3; do
               aws ecs wait tasks-stopped --region "$DEPLOY_REGION" --cluster "$NAME" --tasks "$task" || true
-              status=$(describe 'tasks[0].lastStatus')
+              details=$(inspect) || unknown "The migration task could not be read."
+              status=$(jq -r '.lastStatus' <<<"$details")
               if [ "$status" = "STOPPED" ]; then break; fi
               echo "Still waiting (task status: $status)"
             done
             if [ "$status" != "STOPPED" ]; then
-              echo "::error::The migration task has not finished after 30 minutes (status: $status). It was left running and no second migration was started. Check it, then run the deployment again: $task"
-              exit 1
+              unknown "The migration task has not finished after 30 minutes (status: $status) and was left running."
             fi
 
             aws logs tail "/$NAME/app" --region "$DEPLOY_REGION" --log-stream-name-prefix migrate --since 40m --format short || true
-            code=$(describe 'tasks[0].containers[0].exitCode')
-            reason=$(describe 'tasks[0].stoppedReason')
+            code=$(jq -r '.containers[0].exitCode // "none"' <<<"$details")
+            stop_code=$(jq -r '.stopCode // "none"' <<<"$details")
+            reason=$(jq -r '.stoppedReason // "no reason given"' <<<"$details")
+
             if [ "$code" = "0" ]; then
               echo "Migration succeeded"
               exit 0
             fi
-            if [[ "$code" =~ ^[0-9]+$ ]]; then
+            if [ "$code" != "none" ]; then
               echo "::error::The migration ran and failed (exit code $code): $reason. The app service was NOT updated, and later regions will not be deployed."
               exit 1
             fi
-            echo "Attempt $attempt: the container never ran (exit code: $code): $reason"
+            if [ "$stop_code" != "TaskFailedToStart" ]; then
+              unknown "The migration task stopped without an exit code (stop code: $stop_code, $reason)."
+            fi
+            echo "Attempt $attempt: AWS confirmed the task failed to start: $reason"
+            launch=$((launch + 1))
+            uncertain=no
           done
+          if [ "$uncertain" = "yes" ]; then
+            echo "::error::The last request to start the migration got no answer from AWS, so a task may be running. Check the tasks in cluster $NAME before running the deployment again."
+            exit 1
+          fi
           echo "::error::The migration task could not be started after 3 attempts. The app service was NOT updated, and later regions will not be deployed."
           exit 1
 
