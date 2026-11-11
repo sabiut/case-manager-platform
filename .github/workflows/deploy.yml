@@ -192,27 +192,67 @@ jobs:
           group=$(aws ec2 describe-security-groups --region "$DEPLOY_REGION" --filters "Name=vpc-id,Values=$vpc" "Name=group-name,Values=$NAME-app" --query 'SecurityGroups[0].GroupId' --output text)
           network="{\"awsvpcConfiguration\":{\"subnets\":$subnets,\"securityGroups\":[\"$group\"],\"assignPublicIp\":\"DISABLED\"}}"
 
-          # On a first deployment the task's permissions were created seconds ago and may not have
-          # reached every AWS system yet, so a failed start is retried. The migration is safe to repeat.
+          if [ "$vpc" = "None" ] || [ "$group" = "None" ] || [ "$subnets" = "[]" ]; then
+            echo "::error::Could not find the network for $NAME (vpc=$vpc, security group=$group, subnets=$subnets). Deploy the foundation layer first."
+            exit 1
+          fi
+
+          # Three different failures are handled differently:
+          #   1. The task could not START (API error, or a "failures" entry, or the container never ran).
+          #      On a first deployment the task's permissions are seconds old and may not have reached
+          #      every AWS system yet, so this is retried.
+          #   2. The task is STILL RUNNING when the wait runs out. Nothing new is started, because that
+          #      would put two migrations on the same database. The step fails and names the task.
+          #   3. The migration RAN and failed. That is a real error in the migration, so it is not retried.
+          describe() {
+            aws ecs describe-tasks --region "$DEPLOY_REGION" --cluster "$NAME" --tasks "$task" --query "$1" --output text 2>/dev/null || echo "unknown"
+          }
+
           for attempt in 1 2 3; do
-            task=$(aws ecs run-task --region "$DEPLOY_REGION" --cluster "$NAME" --launch-type FARGATE \
-              --task-definition "$NAME-migrate" --network-configuration "$network" \
-              --query 'tasks[0].taskArn' --output text)
-            echo "Attempt $attempt: migration task started, waiting for it to finish"
-            aws ecs wait tasks-stopped --region "$DEPLOY_REGION" --cluster "$NAME" --tasks "$task"
-            aws logs tail "/$NAME/app" --region "$DEPLOY_REGION" --log-stream-name-prefix migrate --since 10m --format short || true
-            code=$(aws ecs describe-tasks --region "$DEPLOY_REGION" --cluster "$NAME" --tasks "$task" \
-              --query 'tasks[0].containers[0].exitCode' --output text)
+            if [ "$attempt" -gt 1 ]; then sleep 30; fi
+
+            if ! response=$(aws ecs run-task --region "$DEPLOY_REGION" --cluster "$NAME" --launch-type FARGATE \
+              --task-definition "$NAME-migrate" --network-configuration "$network" --output json 2>run-task.err); then
+              echo "Attempt $attempt: the request to start the task failed: $(cat run-task.err)"
+              continue
+            fi
+
+            # A successful response can still contain no task, with the reason in "failures".
+            task=$(jq -r '.tasks[0].taskArn // empty' <<<"$response")
+            if [[ "$task" != arn:aws*:ecs:* ]]; then
+              echo "Attempt $attempt: ECS did not start a task:"
+              jq -r '.failures[]? | "  \(.reason // "no reason given") \(.detail // "")"' <<<"$response"
+              continue
+            fi
+            echo "Attempt $attempt: started $task, waiting for it to finish"
+
+            # One wait lasts up to 10 minutes. Wait up to three times (30 minutes) for the SAME task.
+            status="unknown"
+            for round in 1 2 3; do
+              aws ecs wait tasks-stopped --region "$DEPLOY_REGION" --cluster "$NAME" --tasks "$task" || true
+              status=$(describe 'tasks[0].lastStatus')
+              if [ "$status" = "STOPPED" ]; then break; fi
+              echo "Still waiting (task status: $status)"
+            done
+            if [ "$status" != "STOPPED" ]; then
+              echo "::error::The migration task has not finished after 30 minutes (status: $status). It was left running and no second migration was started. Check it, then run the deployment again: $task"
+              exit 1
+            fi
+
+            aws logs tail "/$NAME/app" --region "$DEPLOY_REGION" --log-stream-name-prefix migrate --since 40m --format short || true
+            code=$(describe 'tasks[0].containers[0].exitCode')
+            reason=$(describe 'tasks[0].stoppedReason')
             if [ "$code" = "0" ]; then
               echo "Migration succeeded"
               exit 0
             fi
-            reason=$(aws ecs describe-tasks --region "$DEPLOY_REGION" --cluster "$NAME" --tasks "$task" \
-              --query 'tasks[0].stoppedReason' --output text)
-            echo "Attempt $attempt failed (exit code $code): $reason"
-            sleep 30
+            if [[ "$code" =~ ^[0-9]+$ ]]; then
+              echo "::error::The migration ran and failed (exit code $code): $reason. The app service was NOT updated, and later regions will not be deployed."
+              exit 1
+            fi
+            echo "Attempt $attempt: the container never ran (exit code: $code): $reason"
           done
-          echo "::error::The database migration failed. The app service was NOT updated, and later regions will not be deployed."
+          echo "::error::The migration task could not be started after 3 attempts. The app service was NOT updated, and later regions will not be deployed."
           exit 1
 
       - name: Plan
