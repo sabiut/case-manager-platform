@@ -33,3 +33,12 @@ module "registry_api" {
   source = "../../../../modules/registry"
   name   = "${local.name}-api"
 }
+
+# LEGACY: the single registry from before the app was split into frontend and API.
+# A region deployed with the old layout still runs images from it, and a rollback would pull from it,
+# so it is kept until that region runs the new frontend and API images.
+# Remove this block in a separate, later change, once no region uses the old layout.
+module "registry" {
+  source = "../../../../modules/registry"
+  name   = local.name
+}
